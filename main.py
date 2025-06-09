@@ -38,6 +38,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 CSV_PATH = 'socioeconomic_dreams.csv'
 ENV_PATH = '.env' # This is typically used by load_dotenv(), not directly in script usually
 GRIDSEARCH_RESULTS_PATH = 'cache/gridsearch_results.joblib'
+CLASS_TFIDF_SCORES_PATH = 'cache/all_words_class_tfidf_scores.csv'
 RANDOM_STATE = 42
 N_SPLITS = 5 # For cross-validation
 CATEGORIES = ['blue_collar', 'gig_worker', 'white_collar']
@@ -491,6 +492,76 @@ def score_full_dataset(csv_path: str = CSV_PATH, model_path: str = GRIDSEARCH_RE
     logging.info(f"Added score columns: {', '.join([f'score_{cat}' for cat in model.classes_])}")
     return df
 
+def calculate_and_save_class_tfidf_scores(
+    df_full: pd.DataFrame,
+    X_embeddings_full: np.ndarray,
+    model,
+    text_column_name: str = 'dream',
+    output_path: str = CLASS_TFIDF_SCORES_PATH
+):
+    """
+    Calculates mean TF-IDF scores for all words for each predicted class and saves them to a CSV.
+    """
+    logging.info(f"--- Calculating and saving TF-IDF scores for all words per class to {output_path} ---")
+
+    if text_column_name not in df_full.columns:
+        logging.error(f"DataFrame must have '{text_column_name}' column.")
+        return
+    if df_full[text_column_name].isnull().all():
+        logging.error(f"The '{text_column_name}' column contains all null values.")
+        return
+
+    # 1. Preprocess text
+    stop_words = set(stopwords.words('english'))
+    # Create a temporary column for processed text on a copy to avoid SettingWithCopyWarning
+    df_processed = df_full.copy()
+    df_processed['processed_text_for_global_tfidf'] = df_processed[text_column_name].fillna('').astype(str).apply(
+        lambda x: ' '.join([word.lower() for word in word_tokenize(x) if word.isalpha() and word.lower() not in stop_words])
+    )
+
+    # 2. Fit TF-IDF Vectorizer on all processed text
+    vectorizer = TfidfVectorizer(max_features=10000) # Using a potentially larger number of features
+    try:
+        tfidf_matrix = vectorizer.fit_transform(df_processed['processed_text_for_global_tfidf'])
+        feature_names = vectorizer.get_feature_names_out()
+    except ValueError as e:
+        logging.error(f"TF-IDF Vectorizer fitting failed, possibly due to empty vocabulary: {e}")
+        return
+    
+    if tfidf_matrix.shape[0] == 0 or tfidf_matrix.shape[1] == 0:
+        logging.warning("TF-IDF matrix is empty. Skipping saving scores.")
+        return
+
+    # 3. Get model predictions for all documents
+    predicted_classes = model.predict(X_embeddings_full)
+
+    # 4. Calculate mean TF-IDF for each word within each predicted class
+    class_tfidf_scores_data = {'feature': feature_names}
+
+    for category_name in model.classes_:
+        class_mask = (predicted_classes == category_name)
+        if np.sum(class_mask) > 0:
+            # Calculate mean TF-IDF for words in documents belonging to this class
+            mean_scores_for_class = np.array(tfidf_matrix[class_mask].mean(axis=0)).flatten()
+        else:
+            # If no documents are predicted for this class, scores are NaN
+            logging.warning(f"No documents predicted as '{category_name}'. Mean TF-IDF scores for this class will be NaN.")
+            mean_scores_for_class = np.full(len(feature_names), np.nan)
+        
+        class_tfidf_scores_data[f'mean_tfidf_{category_name}'] = mean_scores_for_class
+
+    # 5. Create DataFrame and save
+    tfidf_scores_df = pd.DataFrame(class_tfidf_scores_data)
+    
+    try:
+        # Ensure cache directory exists for this new file too
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        tfidf_scores_df.to_csv(output_path, index=False)
+        logging.info(f"Successfully saved class TF-IDF scores for {len(feature_names)} words to {output_path}")
+    except Exception as e:
+        logging.error(f"Failed to save class TF-IDF scores: {e}")
+
+
 def main():
     # Ensure cache directory exists
     os.makedirs(os.path.dirname(GRIDSEARCH_RESULTS_PATH), exist_ok=True)
@@ -557,6 +628,10 @@ def main():
     # which is 'df' after cleaning, sorting, and dropping NaN embeddings.
     for category in CATEGORIES:
         analyze_tfidf_for_category(df.copy(), X_full, model, target_category=category, text_column_name='dream')
+
+    # Calculate and save TF-IDF scores for all words per class
+    if model: # Ensure model was trained
+        calculate_and_save_class_tfidf_scores(df.copy(), X_full, model, text_column_name='dream')
     
     logging.info("--- Script Finished ---")
 
