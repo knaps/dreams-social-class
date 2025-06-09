@@ -186,40 +186,50 @@ def analyze_tfidf_for_category(df_full: pd.DataFrame, X_embeddings_full: np.ndar
         # Using a threshold, e.g., top 25% percentile of probabilities for this category
         # Or simply compare rows where predicted class IS target_category vs. IS NOT.
         # For simplicity with TF-IDF, let's use predicted class.
-        df_full['predicted_class_for_tfidf'] = model.predict(X_embeddings_full)
+        # df_full['predicted_class_for_tfidf'] = model.predict(X_embeddings_full) # Old method
 
-        top_indices = df_full[df_full['predicted_class_for_tfidf'] == target_category].index
-        bottom_indices = df_full[df_full['predicted_class_for_tfidf'] != target_category].index
+        # New method: Define "top" group based on top decile of probability for target_category
+        # all_probas is already calculated above
+        # target_probas is also already calculated: all_probas[:, target_category_idx]
+        
+        if len(target_probas) > 0:
+            top_decile_threshold = np.percentile(target_probas, 90)
+        else:
+            logging.warning(f"No probability scores available for '{target_category}'. Skipping TF-IDF.")
+            return
 
-        if len(top_indices) == 0:
-            logging.warning(f"No dreams predicted as '{target_category}'. Skipping TF-IDF for this category.")
+        top_mask = (target_probas >= top_decile_threshold)
+        bottom_mask = ~top_mask # Compare against all other documents
+
+        num_top_docs = np.sum(top_mask)
+        num_bottom_docs = np.sum(bottom_mask)
+
+        if num_top_docs == 0:
+            logging.warning(f"No dreams found in the top probability decile for '{target_category}' (threshold >= {top_decile_threshold:.4f}). Skipping TF-IDF for this category.")
             return
-        if len(bottom_indices) == 0:
-            logging.warning(f"All dreams predicted as '{target_category}'. Cannot perform differential TF-IDF. Skipping.")
+        if num_bottom_docs == 0:
+            logging.warning(f"All dreams fall into the top probability decile for '{target_category}'. Cannot perform differential TF-IDF. Skipping.")
             return
+        
+        logging.info(f"For LLM theming of '{target_category}', using {num_top_docs} high-confidence documents (top decile, prob >= {top_decile_threshold:.4f}) vs. {num_bottom_docs} other documents.")
 
         # Preprocessing text
         stop_words = set(stopwords.words('english'))
-        df_full['processed_text'] = df_full[text_column_name].fillna('').astype(str).apply(
+        # Ensure 'processed_text' is created on the df_full that aligns with tfidf_matrix
+        # If df_full is modified elsewhere, this could be an issue. Assuming df_full passed here is the clean, full dataset.
+        df_full['processed_text_for_llm_tfidf'] = df_full[text_column_name].fillna('').astype(str).apply(
             lambda x: ' '.join([word.lower() for word in word_tokenize(x) if word.isalpha() and word.lower() not in stop_words])
         )
 
         vectorizer = TfidfVectorizer(max_features=5000)
         # Fit on all processed text to have a common vocabulary
-        tfidf_matrix = vectorizer.fit_transform(df_full['processed_text'])
+        tfidf_matrix = vectorizer.fit_transform(df_full['processed_text_for_llm_tfidf'])
         feature_names = vectorizer.get_feature_names_out()
 
         # Calculate mean TF-IDF for the two groups
-        # Ensure indices are valid for the tfidf_matrix (if df_full was filtered/reindexed)
-        # We use .loc[index].index to get positional indices if df_full.index is not default 0..N-1
-        # However, tfidf_matrix rows correspond to df_full's original 0..N-1 order if not reindexed after processing.
-        # Assuming df_full maintains original indexing or tfidf_matrix is built on a version of df_full
-        # that aligns with top_indices and bottom_indices.
-        # A safer way: get boolean masks.
-        top_mask = (df_full['predicted_class_for_tfidf'] == target_category)
-        bottom_mask = (df_full['predicted_class_for_tfidf'] != target_category)
+        # top_mask and bottom_mask are boolean arrays aligned with df_full and thus with tfidf_matrix rows
 
-        # Check if masks align with tfidf_matrix shape
+        # Check if masks align with tfidf_matrix shape (should be guaranteed if processed_text is created on the same df_full)
         if tfidf_matrix.shape[0] != len(df_full):
              logging.error("Mismatch between TF-IDF matrix rows and DataFrame rows. TF-IDF cannot be reliably performed.")
              # This can happen if df_full was modified (e.g. rows dropped) AFTER 'processed_text' was created
@@ -251,7 +261,7 @@ def analyze_tfidf_for_category(df_full: pd.DataFrame, X_embeddings_full: np.ndar
         # LLM Analysis for Theming
         try:
             ai = AIChat(console=False, model='gpt-4o', api_key=os.getenv("OPENAI_API_KEY")) # Ensure API key is loaded
-            prompt_category_themes = f"""The following words are most strongly associated with dreams classified as '{target_category}' when compared to dreams from other categories. Please group these words into meaningful semantic themes (2-4 themes usually works well). Provide only the theme names and the words belonging to each theme.
+            prompt_category_themes = f"""The following words are most strongly associated with dreams highly representative of '{target_category}' (top probability decile) when compared to all other dreams. Please group these words into meaningful semantic themes (2-4 themes usually works well). Provide only the theme names and the words belonging to each theme.
 
 Words: {', '.join(top_words_for_category)}"""
             response_themes = ai(prompt_category_themes)
@@ -266,10 +276,12 @@ Words: {', '.join(top_words_for_category)}"""
         logging.error(f"Error during TF-IDF analysis for category '{target_category}': {e}")
     finally:
         # Clean up temporary columns if added
-        if 'processed_text' in df_full.columns:
-            df_full.drop(columns=['processed_text'], inplace=True)
-        if 'predicted_class_for_tfidf' in df_full.columns:
-            df_full.drop(columns=['predicted_class_for_tfidf'], inplace=True)
+        if 'processed_text_for_llm_tfidf' in df_full.columns: # Updated column name
+            df_full.drop(columns=['processed_text_for_llm_tfidf'], inplace=True)
+        # 'predicted_class_for_tfidf' is no longer added by this function with the new logic
+        # However, to be safe, if it might be added by other parts or old runs, this check is fine.
+        if 'predicted_class_for_tfidf' in df_full.columns: 
+            df_full.drop(columns=['predicted_class_for_tfidf'], inplace=True, errors='ignore')
 
 
 def find_best_model(X, y, n_splits=N_SPLITS):
