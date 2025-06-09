@@ -26,9 +26,35 @@ N_SPLITS = 5 # For cross-validation
 CATEGORIES = ['blue_collar', 'gig_worker', 'white_collar']
 
 
+def parse_embedding(embedding_str):
+    """Parses the string representation of an embedding into a numpy array."""
+    if pd.isna(embedding_str):
+        return None
+    try:
+        # Assuming format like '{0.1, 0.2, ...}' or '[0.1, 0.2, ...]'
+        cleaned_str = embedding_str.strip('{}[] ')
+        return np.fromstring(cleaned_str, sep=',', dtype=np.float32)
+    except Exception as e:
+        logging.warning(f"Could not parse embedding string: {embedding_str[:50]}... Error: {e}")
+        return None
+
 def load_dreams(path:str):
+    logging.info(f"Loading data from {path}...")
+    try:
+        df = pd.read_csv(df, index_col=0)
+        # Ensure 'embedding' column is parsed correctly if it's stored as a string
+        if 'embedding' in df.columns and isinstance(df['embedding'].iloc[0], str):
+             logging.info("Parsing string embeddings in synesthesia data...")
+             df['embedding'] = df['embedding'].apply(parse_embedding)
+             # Drop rows where embedding parsing failed
+             original_len = len(df)
+             df = df.dropna(subset=['embedding'])
+             if len(df) < original_len:
+                 logging.warning(f"Dropped {original_len - len(df)} rows due to embedding parsing errors.")
+
     df = pd.read_csv(path)
     df['n_categories']=df[['blue_collar','gig_worker','white_collar']].sum(axis=1)
+    return df
 
 def analyze_and_clean(df:pd.DataFrame):
     '''
