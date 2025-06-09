@@ -522,7 +522,7 @@ def calculate_and_save_class_tfidf_scores(
     )
 
     # 2. Fit TF-IDF Vectorizer on all processed text
-    vectorizer = TfidfVectorizer(max_features=10000) # Using a potentially larger number of features
+    vectorizer = TfidfVectorizer(max_features=5000) # Standardizing to 5000 features
     try:
         tfidf_matrix = vectorizer.fit_transform(df_processed['processed_text_for_global_tfidf'])
         feature_names = vectorizer.get_feature_names_out()
