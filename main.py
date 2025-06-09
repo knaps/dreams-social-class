@@ -425,6 +425,72 @@ def get_dream_scores(dream_text: str, model_path: str = GRIDSEARCH_RESULTS_PATH)
         logging.error(f"Failed to predict scores with the model: {e}")
         return None
 
+def score_full_dataset(csv_path: str = CSV_PATH, model_path: str = GRIDSEARCH_RESULTS_PATH) -> pd.DataFrame | None:
+    """
+    Loads the full dream dataset, the pre-trained model, and adds predicted scores
+    for each class to the DataFrame.
+
+    Args:
+        csv_path: Path to the dream dataset CSV file.
+        model_path: Path to the saved trained model.
+
+    Returns:
+        A pandas DataFrame with added score columns (e.g., 'score_blue_collar'),
+        or None if an error occurs.
+    """
+    logging.info("--- Scoring full dataset ---")
+
+    # 1. Load the dataset
+    df = load_dreams(csv_path)
+    if df is None or df.empty:
+        logging.error("Failed to load or dataset is empty.")
+        return None
+
+    # Ensure embeddings are present and in correct format (numpy arrays)
+    # Drop rows where 'embedding' is NaN as these cannot be scored
+    df_valid_embeddings = df.dropna(subset=['embedding']).copy()
+    if df_valid_embeddings.empty:
+        logging.warning("No rows with valid embeddings found in the dataset to score.")
+        # Return original df with no scores, or an empty df with score columns, or None?
+        # For now, let's add empty score columns to the original df to indicate attempt.
+        for category in CATEGORIES: # Assuming CATEGORIES is globally defined
+            df[f'score_{category}'] = np.nan
+        return df
+
+    X_embeddings = np.vstack(df_valid_embeddings['embedding'].values)
+
+    # 2. Load the pre-trained model
+    if not os.path.exists(model_path):
+        logging.error(f"Model file not found at {model_path}. Please run the main training script first.")
+        return None
+    try:
+        model = joblib.load(model_path)
+        logging.info(f"Successfully loaded model from {model_path}")
+    except Exception as e:
+        logging.error(f"Failed to load model from {model_path}: {e}")
+        return None
+
+    # 3. Predict probabilities for all valid embeddings
+    try:
+        all_probabilities = model.predict_proba(X_embeddings)
+        logging.info(f"Successfully predicted probabilities for {len(X_embeddings)} dreams.")
+    except Exception as e:
+        logging.error(f"Failed to predict probabilities with the model: {e}")
+        return None
+
+    # 4. Add scores to the DataFrame
+    # Create score columns in the original df, then fill for valid rows
+    for i, category in enumerate(model.classes_): # Use model.classes_ for correct order
+        score_col_name = f'score_{category}'
+        # Initialize column in the main df (df_valid_embeddings is a subset)
+        df[score_col_name] = np.nan
+        # Assign scores to the corresponding rows in the original DataFrame
+        # using the index from df_valid_embeddings
+        df.loc[df_valid_embeddings.index, score_col_name] = all_probabilities[:, i]
+
+    logging.info(f"Added score columns: {', '.join([f'score_{cat}' for cat in model.classes_])}")
+    return df
+
 def main():
     # Ensure cache directory exists
     os.makedirs(os.path.dirname(GRIDSEARCH_RESULTS_PATH), exist_ok=True)
@@ -505,3 +571,19 @@ if __name__ == '__main__':
         logging.info(f"Scores for example dream ('{example_dream[:50]}...'): {scores}")
     else:
         logging.info("Could not get scores for the example dream.")
+
+    logging.info("\n--- Example: Scoring the full dataset ---")
+    df_with_scores = score_full_dataset()
+    if df_with_scores is not None:
+        logging.info("Successfully scored the full dataset.")
+        # Display info for a few rows with scores
+        score_cols = [f'score_{cat}' for cat in CATEGORIES] # Assuming CATEGORIES matches model classes
+        # Check if score columns were actually added
+        if all(col in df_with_scores.columns for col in score_cols):
+             logging.info(f"Sample of DataFrame with scores (first 5 rows with non-NaN embeddings):\n{df_with_scores[df_with_scores[score_cols[0]].notna()].head()}")
+        else:
+            logging.warning("Score columns may not have been added correctly to all rows.")
+            logging.info(f"Full dataset head:\n{df_with_scores.head()}")
+
+    else:
+        logging.info("Failed to score the full dataset.")
