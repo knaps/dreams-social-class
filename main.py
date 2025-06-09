@@ -119,17 +119,45 @@ def analyze_and_clean(df:pd.DataFrame):
     # stacked bar chart showing dream counts by category by year
     # overlapping: number of users by n_categories
 
-    # --- Placeholder for detailed EDA ---
-    logging.info("Performing initial EDA on the dataset...")
-    # logging.info(f"Dataset shape: {df.shape}")
-    # logging.info(f"Number of dreams: {len(df)}")
-    # logging.info(f"Number of dreams with embeddings: {df['embedding'].notna().sum()}")
-    # logging.info(f"Number of unique authors: {df['author'].nunique()}")
-    # logging.info("Distribution of n_categories:\n" + str(df['n_categories'].value_counts()))
-    # for cat in CATEGORIES:
-    #     logging.info(f"Dream counts for {cat}: {df[cat].sum()}")
-    # Add more EDA: user counts by category, dream counts by year, etc.
-    # Visualizations would typically go here (e.g., matplotlib, seaborn)
+    # --- Detailed EDA ---
+    logging.info("--- Initial EDA on Raw Dataset ---")
+    logging.info(f"Raw dataset shape: {df.shape}")
+    logging.info(f"Total dreams (raw): {len(df)}")
+    logging.info(f"Dreams with embeddings (raw): {df['embedding'].notna().sum()}")
+    if 'author' in df.columns:
+        logging.info(f"Unique authors (raw): {df['author'].nunique()}")
+    else:
+        logging.info("'author' column not found for unique author count.")
+
+    logging.info(f"Distribution of 'n_categories' (raw):\n{df['n_categories'].value_counts(dropna=False).sort_index().to_string()}")
+
+    for cat in CATEGORIES:
+        dreams_in_cat = df[cat].sum()
+        authors_in_cat = 0
+        if 'author' in df.columns:
+            authors_in_cat = df[df[cat] == 1]['author'].nunique()
+        logging.info(f"Category '{cat}' (raw): {dreams_in_cat} dreams, {authors_in_cat} unique authors.")
+
+    if 'created_utc' in df.columns:
+        # Attempt to parse 'created_utc' if it's not already datetime
+        if not pd.api.types.is_datetime64_any_dtype(df['created_utc']):
+            try:
+                df['created_utc_dt'] = pd.to_datetime(df['created_utc'], errors='coerce')
+            except Exception as e:
+                logging.warning(f"Could not parse 'created_utc' for year stats: {e}")
+                df['created_utc_dt'] = None # Ensure column exists to prevent later errors
+        else:
+            df['created_utc_dt'] = df['created_utc']
+
+        if df['created_utc_dt'] is not None and df['created_utc_dt'].notna().any():
+            df['year'] = df['created_utc_dt'].dt.year
+            logging.info(f"Dream counts by year (raw):\n{df['year'].value_counts().sort_index().to_string()}")
+        else:
+            logging.info("Could not generate dream counts by year (raw) due to 'created_utc' parsing issues or all NaT.")
+            df['year'] = np.nan # Ensure column exists
+    else:
+        logging.info("'created_utc' column not found for year-based stats.")
+        df['year'] = np.nan # Ensure column exists
 
     # Cleanup: remove records where n_categories > 1 (i.e., keep only n_categories == 1)
     original_count = len(df)
@@ -140,15 +168,37 @@ def analyze_and_clean(df:pd.DataFrame):
         logging.error("DataFrame is empty after filtering for n_categories == 1. Cannot proceed.")
         raise ValueError("No data remaining after filtering for single category assignment.")
 
-    # --- Placeholder for re-running EDA on cleaned dataset ---
-    # logging.info("Performing EDA on the cleaned dataset...")
-    # ... (similar EDA calls as above) ...
+    # --- EDA on Cleaned Dataset ---
+    logging.info("--- EDA on Cleaned Dataset (n_categories == 1) ---")
+    logging.info(f"Cleaned dataset shape: {df.shape}")
+    logging.info(f"Total dreams (cleaned): {len(df)}")
+    logging.info(f"Dreams with embeddings (cleaned): {df['embedding'].notna().sum()}")
+    if 'author' in df.columns:
+        logging.info(f"Unique authors (cleaned): {df['author'].nunique()}")
 
     # Create multiclass y var
     # Ensure that after filtering, each row has exactly one category marked as 1
     df['y'] = df[CATEGORIES].idxmax(axis=1)
-    logging.info(f"Created target variable 'y'. Value counts:\n{df['y'].value_counts(dropna=False)}")
+    logging.info(f"Distribution of target variable 'y' (cleaned):\n{df['y'].value_counts(dropna=False).sort_index().to_string()}")
 
+    for cat in CATEGORIES: # Now refers to the single assigned category in 'y'
+        dreams_in_cat_cleaned = (df['y'] == cat).sum()
+        authors_in_cat_cleaned = 0
+        if 'author' in df.columns:
+            authors_in_cat_cleaned = df[df['y'] == cat]['author'].nunique()
+        logging.info(f"Category '{cat}' (cleaned): {dreams_in_cat_cleaned} dreams, {authors_in_cat_cleaned} unique authors.")
+    
+    if 'year' in df.columns and df['year'].notna().any(): # 'year' column was created from 'created_utc_dt'
+        logging.info(f"Dream counts by year (cleaned):\n{df['year'].value_counts().sort_index().to_string()}")
+    else:
+        logging.info("Could not generate dream counts by year (cleaned).")
+
+    # Clean up temporary datetime columns if they were created
+    if 'created_utc_dt' in df.columns:
+        df.drop(columns=['created_utc_dt'], inplace=True, errors='ignore')
+    if 'year' in df.columns: # We might want to keep 'year' if it's useful downstream, or drop it. Let's drop for now.
+        df.drop(columns=['year'], inplace=True, errors='ignore')
+        
     # return the cleaned dataframe
     return df
 
@@ -327,6 +377,7 @@ def find_best_model(X, y, n_splits=N_SPLITS):
     scoring = 'roc_auc_ovr'
     best_score = -1
     best_pipeline = None
+    overall_best_params = None
 
     search_configs = [
         ("Logistic Regression (No PCA)", pipe_base, param_grid_lr),
@@ -344,6 +395,7 @@ def find_best_model(X, y, n_splits=N_SPLITS):
             if search.best_score_ > best_score:
                 best_score = search.best_score_
                 best_pipeline = search.best_estimator_
+                overall_best_params = search.best_params_
                 logging.info(f"*** New overall best model found: {name} (Score: {best_score:.4f}) ***")
 
         except Exception as e:
@@ -355,6 +407,8 @@ def find_best_model(X, y, n_splits=N_SPLITS):
 
     logging.info(f"--- GridSearchCV Finished ---")
     logging.info(f"Overall best pipeline score ({scoring}): {best_score:.4f}")
+    if overall_best_params:
+        logging.info(f"Overall best hyperparameters: {overall_best_params}")
     logging.info(f"Overall best pipeline configuration: {best_pipeline}")
 
     try:
