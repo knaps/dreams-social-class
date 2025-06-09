@@ -532,23 +532,39 @@ def calculate_and_save_class_tfidf_scores(
         logging.warning("TF-IDF matrix is empty. Skipping saving scores.")
         return
 
-    # 3. Get model predictions for all documents
-    predicted_classes = model.predict(X_embeddings_full)
+    # 3. Get model probability scores for all documents and all classes
+    all_probabilities = model.predict_proba(X_embeddings_full)
 
-    # 4. Calculate mean TF-IDF for each word within each predicted class
+    # 4. Calculate mean TF-IDF for each word within the top decile of scores for each class
     class_tfidf_scores_data = {'feature': feature_names}
 
-    for category_name in model.classes_:
-        class_mask = (predicted_classes == category_name)
-        if np.sum(class_mask) > 0:
-            # Calculate mean TF-IDF for words in documents belonging to this class
+    for i, category_name in enumerate(model.classes_):
+        # Get probability scores for the current category
+        category_probabilities = all_probabilities[:, i]
+        
+        # Determine the threshold for the top decile (90th percentile)
+        # Handle cases with very few documents or uniform probabilities
+        if len(category_probabilities) > 0:
+            top_decile_threshold = np.percentile(category_probabilities, 90)
+        else:
+            top_decile_threshold = 1.0 # Default if no probabilities (should not happen if X_embeddings_full is not empty)
+
+        # Create a mask for documents in the top decile for this category
+        # Include scores equal to the threshold to ensure at least 10% if many scores are identical at the percentile
+        class_mask = (category_probabilities >= top_decile_threshold)
+        
+        num_top_decile_docs = np.sum(class_mask)
+
+        if num_top_decile_docs > 0:
+            logging.info(f"Calculating mean TF-IDF for '{category_name}' using {num_top_decile_docs} documents from its top probability decile (threshold >= {top_decile_threshold:.4f}).")
+            # Calculate mean TF-IDF for words in documents belonging to this class's top decile
             mean_scores_for_class = np.array(tfidf_matrix[class_mask].mean(axis=0)).flatten()
         else:
-            # If no documents are predicted for this class, scores are NaN
-            logging.warning(f"No documents predicted as '{category_name}'. Mean TF-IDF scores for this class will be NaN.")
+            # If no documents meet the top decile threshold for this class
+            logging.warning(f"No documents found in the top probability decile for '{category_name}' (threshold >= {top_decile_threshold:.4f}). Mean TF-IDF scores for this class will be NaN.")
             mean_scores_for_class = np.full(len(feature_names), np.nan)
         
-        class_tfidf_scores_data[f'mean_tfidf_{category_name}'] = mean_scores_for_class
+        class_tfidf_scores_data[f'mean_tfidf_top_decile_{category_name}'] = mean_scores_for_class
 
     # 5. Create DataFrame and save
     tfidf_scores_df = pd.DataFrame(class_tfidf_scores_data)
