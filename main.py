@@ -15,6 +15,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 import joblib # For saving/loading models
 from sklearn.metrics import classification_report
+from openai import OpenAI
 
 load_dotenv()
 
@@ -376,6 +377,54 @@ def evaluate_performance(model, X_test, y_test, target_names=None):
     except Exception as e:
         logging.error(f"Error during model evaluation: {e}")
 
+def get_dream_scores(dream_text: str, model_path: str = GRIDSEARCH_RESULTS_PATH) -> dict | None:
+    """
+    Gets the socioeconomic category scores for a single dream text.
+
+    Args:
+        dream_text: The text of the dream.
+        model_path: Path to the saved trained model.
+
+    Returns:
+        A dictionary mapping category names to scores (probabilities), or None if an error occurs.
+    """
+    logging.info(f"Getting scores for dream: '{dream_text[:100]}...'")
+
+    # 1. Initialize OpenAI client and get embedding
+    try:
+        client = OpenAI() # API key is read from OPENAI_API_KEY environment variable
+        response = client.embeddings.create(
+            input=dream_text,
+            model="text-embedding-3-large"
+        )
+        embedding = np.array(response.data[0].embedding, dtype=np.float32).reshape(1, -1)
+        logging.info(f"Successfully obtained embedding of shape {embedding.shape}")
+    except Exception as e:
+        logging.error(f"Failed to get embedding from OpenAI: {e}")
+        return None
+
+    # 2. Load the pre-trained model
+    if not os.path.exists(model_path):
+        logging.error(f"Model file not found at {model_path}. Please run the main training script first.")
+        return None
+    try:
+        model = joblib.load(model_path)
+        logging.info(f"Successfully loaded model from {model_path}")
+    except Exception as e:
+        logging.error(f"Failed to load model from {model_path}: {e}")
+        return None
+
+    # 3. Predict probabilities
+    try:
+        probabilities = model.predict_proba(embedding)
+        # model.classes_ should give the order of classes for the probabilities
+        scores = dict(zip(model.classes_, probabilities[0]))
+        logging.info(f"Predicted scores: {scores}")
+        return scores
+    except Exception as e:
+        logging.error(f"Failed to predict scores with the model: {e}")
+        return None
+
 def main():
     # Ensure cache directory exists
     os.makedirs(os.path.dirname(GRIDSEARCH_RESULTS_PATH), exist_ok=True)
@@ -447,3 +496,12 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+    # Example usage of get_dream_scores
+    logging.info("\n--- Example: Scoring a new dream ---")
+    example_dream = "I dreamt I was flying over a city made of code, trying to find a bug in the system."
+    scores = get_dream_scores(example_dream)
+    if scores:
+        logging.info(f"Scores for example dream ('{example_dream[:50]}...'): {scores}")
+    else:
+        logging.info("Could not get scores for the example dream.")
