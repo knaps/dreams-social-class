@@ -188,35 +188,27 @@ def analyze_tfidf_for_category(df_full: pd.DataFrame, X_embeddings_full: np.ndar
         # For simplicity with TF-IDF, let's use predicted class.
         # df_full['predicted_class_for_tfidf'] = model.predict(X_embeddings_full) # Old method
 
-        # New method: Define "top" group based on top decile of probability for target_category
-        # all_probas is already calculated above
-        # target_probas is also already calculated: all_probas[:, target_category_idx]
-        
-        if len(target_probas) > 0:
-            top_decile_threshold = np.percentile(target_probas, 90)
-        else:
-            logging.warning(f"No probability scores available for '{target_category}'. Skipping TF-IDF.")
-            return
+        # Using hard predictions: documents predicted as target_category vs. documents predicted as other categories.
+        df_full['predicted_class_for_tfidf_llm'] = model.predict(X_embeddings_full)
 
-        top_mask = (target_probas >= top_decile_threshold)
-        bottom_mask = ~top_mask # Compare against all other documents
+        top_mask = (df_full['predicted_class_for_tfidf_llm'] == target_category)
+        bottom_mask = (df_full['predicted_class_for_tfidf_llm'] != target_category)
 
         num_top_docs = np.sum(top_mask)
         num_bottom_docs = np.sum(bottom_mask)
 
         if num_top_docs == 0:
-            logging.warning(f"No dreams found in the top probability decile for '{target_category}' (threshold >= {top_decile_threshold:.4f}). Skipping TF-IDF for this category.")
+            logging.warning(f"No dreams predicted as '{target_category}'. Skipping TF-IDF for LLM theming for this category.")
             return
         if num_bottom_docs == 0:
-            logging.warning(f"All dreams fall into the top probability decile for '{target_category}'. Cannot perform differential TF-IDF. Skipping.")
+            logging.warning(f"All dreams predicted as '{target_category}'. Cannot perform differential TF-IDF for LLM theming. Skipping.")
             return
         
-        logging.info(f"For LLM theming of '{target_category}', using {num_top_docs} high-confidence documents (top decile, prob >= {top_decile_threshold:.4f}) vs. {num_bottom_docs} other documents.")
+        logging.info(f"For LLM theming of '{target_category}', using {num_top_docs} documents predicted as '{target_category}' vs. {num_bottom_docs} documents predicted as other categories.")
 
         # Preprocessing text
         stop_words = set(stopwords.words('english'))
         # Ensure 'processed_text' is created on the df_full that aligns with tfidf_matrix
-        # If df_full is modified elsewhere, this could be an issue. Assuming df_full passed here is the clean, full dataset.
         df_full['processed_text_for_llm_tfidf'] = df_full[text_column_name].fillna('').astype(str).apply(
             lambda x: ' '.join([word.lower() for word in word_tokenize(x) if word.isalpha() and word.lower() not in stop_words])
         )
@@ -261,7 +253,7 @@ def analyze_tfidf_for_category(df_full: pd.DataFrame, X_embeddings_full: np.ndar
         # LLM Analysis for Theming
         try:
             ai = AIChat(console=False, model='gpt-4o', api_key=os.getenv("OPENAI_API_KEY")) # Ensure API key is loaded
-            prompt_category_themes = f"""The following words are most strongly associated with dreams highly representative of '{target_category}' (top probability decile) when compared to all other dreams. Please group these words into meaningful semantic themes (2-4 themes usually works well). Provide only the theme names and the words belonging to each theme.
+            prompt_category_themes = f"""The following words are most strongly associated with dreams classified as '{target_category}' when compared to dreams classified as other categories. Please group these words into meaningful semantic themes (2-4 themes usually works well). Provide only the theme names and the words belonging to each theme.
 
 Words: {', '.join(top_words_for_category)}"""
             response_themes = ai(prompt_category_themes)
@@ -276,12 +268,10 @@ Words: {', '.join(top_words_for_category)}"""
         logging.error(f"Error during TF-IDF analysis for category '{target_category}': {e}")
     finally:
         # Clean up temporary columns if added
-        if 'processed_text_for_llm_tfidf' in df_full.columns: # Updated column name
+        if 'processed_text_for_llm_tfidf' in df_full.columns:
             df_full.drop(columns=['processed_text_for_llm_tfidf'], inplace=True)
-        # 'predicted_class_for_tfidf' is no longer added by this function with the new logic
-        # However, to be safe, if it might be added by other parts or old runs, this check is fine.
-        if 'predicted_class_for_tfidf' in df_full.columns: 
-            df_full.drop(columns=['predicted_class_for_tfidf'], inplace=True, errors='ignore')
+        if 'predicted_class_for_tfidf_llm' in df_full.columns: 
+            df_full.drop(columns=['predicted_class_for_tfidf_llm'], inplace=True, errors='ignore')
 
 
 def find_best_model(X, y, n_splits=N_SPLITS):
@@ -544,39 +534,30 @@ def calculate_and_save_class_tfidf_scores(
         logging.warning("TF-IDF matrix is empty. Skipping saving scores.")
         return
 
-    # 3. Get model probability scores for all documents and all classes
-    all_probabilities = model.predict_proba(X_embeddings_full)
+    # 3. Get model's hard predictions for all documents
+    predicted_classes = model.predict(X_embeddings_full)
+    df_processed['predicted_class_for_global_tfidf'] = predicted_classes # Add to the df with processed text
 
-    # 4. Calculate mean TF-IDF for each word within the top decile of scores for each class
+    # 4. Calculate mean TF-IDF for each word within documents predicted for each class
     class_tfidf_scores_data = {'feature': feature_names}
 
-    for i, category_name in enumerate(model.classes_):
-        # Get probability scores for the current category
-        category_probabilities = all_probabilities[:, i]
+    for category_name in model.classes_:
+        # Create a mask for documents predicted to be in the current category
+        class_mask = (df_processed['predicted_class_for_global_tfidf'] == category_name)
         
-        # Determine the threshold for the top decile (90th percentile)
-        # Handle cases with very few documents or uniform probabilities
-        if len(category_probabilities) > 0:
-            top_decile_threshold = np.percentile(category_probabilities, 90)
-        else:
-            top_decile_threshold = 1.0 # Default if no probabilities (should not happen if X_embeddings_full is not empty)
+        num_predicted_docs = np.sum(class_mask)
 
-        # Create a mask for documents in the top decile for this category
-        # Include scores equal to the threshold to ensure at least 10% if many scores are identical at the percentile
-        class_mask = (category_probabilities >= top_decile_threshold)
-        
-        num_top_decile_docs = np.sum(class_mask)
-
-        if num_top_decile_docs > 0:
-            logging.info(f"Calculating mean TF-IDF for '{category_name}' using {num_top_decile_docs} documents from its top probability decile (threshold >= {top_decile_threshold:.4f}).")
-            # Calculate mean TF-IDF for words in documents belonging to this class's top decile
+        if num_predicted_docs > 0:
+            logging.info(f"Calculating mean TF-IDF for '{category_name}' using {num_predicted_docs} documents predicted as this class.")
+            # Calculate mean TF-IDF for words in documents belonging to this class
+            # Ensure tfidf_matrix rows align with df_processed rows where class_mask is derived
             mean_scores_for_class = np.array(tfidf_matrix[class_mask].mean(axis=0)).flatten()
         else:
-            # If no documents meet the top decile threshold for this class
-            logging.warning(f"No documents found in the top probability decile for '{category_name}' (threshold >= {top_decile_threshold:.4f}). Mean TF-IDF scores for this class will be NaN.")
+            # If no documents are predicted for this class
+            logging.warning(f"No documents predicted as '{category_name}'. Mean TF-IDF scores for this class will be NaN.")
             mean_scores_for_class = np.full(len(feature_names), np.nan)
         
-        class_tfidf_scores_data[f'mean_tfidf_top_decile_{category_name}'] = mean_scores_for_class
+        class_tfidf_scores_data[f'mean_tfidf_predicted_as_{category_name}'] = mean_scores_for_class
 
     # 5. Create DataFrame and save
     tfidf_scores_df = pd.DataFrame(class_tfidf_scores_data)
