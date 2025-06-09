@@ -446,12 +446,4 @@ def main():
     logging.info("--- Script Finished ---")
 
 if __name__ == '__main__':
-    # split data into 80% train %20 test - using the last 20% of created_utc records as test
-    # train, test = 
-    pass
-    model = find_best_model(X=df['embedding'], y=df['y'])
-    evaluate_performance(model)
-    # do analyze_tfidf_deciles but need to adapt it for this multiclass. Get top decile of scores for each class and do the analysis
-    # might need to do some processing here to get the score deciles for each class etc.
-    analyze_tfidf_deciles()
-    pass
+    main()
