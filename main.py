@@ -14,8 +14,11 @@ from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 import joblib # For saving/loading models
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix, roc_curve
+from sklearn.preprocessing import label_binarize
 from openai import OpenAI
+import matplotlib.pyplot as plt
+from itertools import cycle
 
 load_dotenv()
 
@@ -39,6 +42,7 @@ CSV_PATH = 'socioeconomic_dreams.csv'
 ENV_PATH = '.env' # This is typically used by load_dotenv(), not directly in script usually
 GRIDSEARCH_RESULTS_PATH = 'cache/gridsearch_results.joblib'
 CLASS_TFIDF_SCORES_PATH = 'cache/all_words_class_tfidf_scores.csv'
+ROC_CURVE_PLOT_PATH = 'cache/roc_auc_curves.png'
 RANDOM_STATE = 42
 N_SPLITS = 5 # For cross-validation
 CATEGORIES = ['blue_collar', 'gig_worker', 'white_collar']
@@ -434,9 +438,74 @@ def evaluate_performance(model, X_test, y_test, target_names=None):
 
     try:
         y_pred = model.predict(X_test)
+        y_proba = model.predict_proba(X_test) # Get probabilities for ROC AUC
+
+        # 1. Classification Report
         report = classification_report(y_test, y_pred, target_names=target_names, zero_division=0)
         logging.info("Classification Report:\n" + report)
-        # Potentially: Add confusion matrix, ROC AUC scores per class, etc.
+
+        # 2. Confusion Matrix
+        cm = confusion_matrix(y_test, y_pred, labels=target_names)
+        logging.info(f"Confusion Matrix (Rows: True, Cols: Predicted):\nLabels: {target_names}\n{cm}")
+        
+        cm_normalized = confusion_matrix(y_test, y_pred, labels=target_names, normalize='true')
+        logging.info(f"Normalized Confusion Matrix (Rows: True, Cols: Predicted):\nLabels: {target_names}\n{cm_normalized}")
+
+        # 3. ROC AUC Score (Multiclass)
+        # Binarize the output classes for OvR ROC AUC calculation
+        y_test_binarized = label_binarize(y_test, classes=target_names)
+        
+        # Ensure y_proba columns align with target_names if model.classes_ might differ
+        # For safety, reorder y_proba columns according to target_names if necessary
+        # This assumes target_names is the definitive order from CATEGORIES
+        model_class_order = list(model.classes_)
+        if model_class_order != target_names:
+            logging.warning(f"Model classes order {model_class_order} differs from target_names {target_names}. Reordering y_proba for ROC AUC.")
+            # Create a mapping from model_class_order to indices
+            class_to_idx = {cls_name: idx for idx, cls_name in enumerate(model_class_order)}
+            # Get the indices in the order of target_names
+            ordered_indices = [class_to_idx[cls_name] for cls_name in target_names if cls_name in class_to_idx]
+            # Reorder y_proba
+            y_proba_ordered = y_proba[:, ordered_indices]
+        else:
+            y_proba_ordered = y_proba
+
+        if y_test_binarized.shape[1] == y_proba_ordered.shape[1]:
+            roc_auc_ovr = roc_auc_score(y_test_binarized, y_proba_ordered, multi_class='ovr', average='weighted')
+            logging.info(f"Weighted OvR ROC AUC Score: {roc_auc_ovr:.4f}")
+        else:
+            logging.error(f"Shape mismatch for ROC AUC: y_test_binarized ({y_test_binarized.shape}) vs y_proba_ordered ({y_proba_ordered.shape}). Skipping ROC AUC score.")
+
+
+        # 4. Plot and Save ROC Curves (One-vs-Rest for each class)
+        plt.figure(figsize=(10, 8))
+        colors = cycle(['aqua', 'darkorange', 'cornflowerblue', 'green', 'red', 'purple']) # Add more if more classes
+
+        for i, (class_name, color) in enumerate(zip(target_names, colors)):
+            if i < y_test_binarized.shape[1] and i < y_proba_ordered.shape[1]:
+                fpr, tpr, _ = roc_curve(y_test_binarized[:, i], y_proba_ordered[:, i])
+                roc_auc = roc_auc_score(y_test_binarized[:, i], y_proba_ordered[:, i])
+                plt.plot(fpr, tpr, color=color, lw=2,
+                         label=f'ROC curve of class {class_name} (area = {roc_auc:.2f})')
+            else:
+                logging.warning(f"Skipping ROC curve for class {class_name} due to index mismatch.")
+
+        plt.plot([0, 1], [0, 1], 'k--', lw=2)
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title('Receiver Operating Characteristic (ROC) - Multiclass (One-vs-Rest)')
+        plt.legend(loc="lower right")
+        
+        try:
+            os.makedirs(os.path.dirname(ROC_CURVE_PLOT_PATH), exist_ok=True)
+            plt.savefig(ROC_CURVE_PLOT_PATH)
+            logging.info(f"ROC curves saved to {ROC_CURVE_PLOT_PATH}")
+        except Exception as e_plot:
+            logging.error(f"Failed to save ROC curve plot: {e_plot}")
+        plt.close()
+
     except Exception as e:
         logging.error(f"Error during model evaluation: {e}")
 
