@@ -559,14 +559,41 @@ def calculate_and_save_class_tfidf_scores(
         
         class_tfidf_scores_data[f'mean_tfidf_predicted_as_{category_name}'] = mean_scores_for_class
 
-    # 5. Create DataFrame and save
+    # 5. Create DataFrame with mean TF-IDF scores
     tfidf_scores_df = pd.DataFrame(class_tfidf_scores_data)
-    
+
+    # 6. Calculate and add difference columns
+    all_class_names = list(model.classes_)
+    for target_category_name in all_class_names:
+        mean_tfidf_col_target = f'mean_tfidf_predicted_as_{target_category_name}'
+        
+        other_category_names = [cn for cn in all_class_names if cn != target_category_name]
+        
+        if not other_category_names: # Should not happen with >1 class
+            tfidf_scores_df[f'diff_vs_others_{target_category_name}'] = tfidf_scores_df[mean_tfidf_col_target]
+            continue
+
+        # Calculate mean of other categories' TF-IDF scores for each word
+        other_cols_to_average = [f'mean_tfidf_predicted_as_{other_cat}' for other_cat in other_category_names]
+        
+        # Ensure all necessary columns exist before trying to average them
+        valid_other_cols_to_average = [col for col in other_cols_to_average if col in tfidf_scores_df.columns]
+        
+        if not valid_other_cols_to_average:
+            logging.warning(f"No valid TF-IDF columns found for 'other' categories when calculating diff for '{target_category_name}'. Skipping diff calculation for this category.")
+            tfidf_scores_df[f'diff_vs_others_{target_category_name}'] = np.nan
+            continue
+            
+        mean_of_others = tfidf_scores_df[valid_other_cols_to_average].mean(axis=1)
+        
+        tfidf_scores_df[f'diff_vs_others_{target_category_name}'] = tfidf_scores_df[mean_tfidf_col_target] - mean_of_others
+        logging.info(f"Added difference column: 'diff_vs_others_{target_category_name}'")
+
     try:
         # Ensure cache directory exists for this new file too
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         tfidf_scores_df.to_csv(output_path, index=False)
-        logging.info(f"Successfully saved class TF-IDF scores for {len(feature_names)} words to {output_path}")
+        logging.info(f"Successfully saved class TF-IDF scores (including differences) for {len(feature_names)} words to {output_path}")
     except Exception as e:
         logging.error(f"Failed to save class TF-IDF scores: {e}")
 
