@@ -142,18 +142,24 @@ def analyze_and_clean(df:pd.DataFrame):
         # Attempt to parse 'created_utc' if it's not already datetime
         if not pd.api.types.is_datetime64_any_dtype(df['created_utc']):
             try:
-                df['created_utc_dt'] = pd.to_datetime(df['created_utc'], errors='coerce')
+                # Convert to datetime, coercing errors, and standardize to UTC
+                df['created_utc_dt'] = pd.to_datetime(df['created_utc'], errors='coerce', utc=True)
             except Exception as e:
                 logging.warning(f"Could not parse 'created_utc' for year stats: {e}")
-                df['created_utc_dt'] = None # Ensure column exists to prevent later errors
+                df['created_utc_dt'] = pd.Series([pd.NaT] * len(df), index=df.index) # Ensure column is NaT series
         else:
-            df['created_utc_dt'] = df['created_utc']
+            # If already datetime, ensure it's UTC for consistency or handle appropriately
+            if df['created_utc'].dt.tz is None:
+                df['created_utc_dt'] = df['created_utc'].dt.tz_localize('UTC', ambiguous='NaT', nonexistent='NaT')
+            else:
+                df['created_utc_dt'] = df['created_utc'].dt.tz_convert('UTC')
 
-        if df['created_utc_dt'] is not None and df['created_utc_dt'].notna().any():
+        # Check if the conversion was successful and the column is actually datetimelike
+        if pd.api.types.is_datetime64_any_dtype(df['created_utc_dt']) and df['created_utc_dt'].notna().any():
             df['year'] = df['created_utc_dt'].dt.year
             logging.info(f"Dream counts by year (raw):\n{df['year'].value_counts().sort_index().to_string()}")
         else:
-            logging.info("Could not generate dream counts by year (raw) due to 'created_utc' parsing issues or all NaT.")
+            logging.info("Could not generate dream counts by year (raw) as 'created_utc_dt' is not a valid datetime series or is all NaT.")
             df['year'] = np.nan # Ensure column exists
     else:
         logging.info("'created_utc' column not found for year-based stats.")
