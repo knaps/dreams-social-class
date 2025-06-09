@@ -1,26 +1,42 @@
 import pandas as pd
 from dotenv import load_dotenv
+import os
+import logging
+import numpy as np
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from sklearn.feature_extraction.text import TfidfVectorizer
+from simpleaichat import AIChat
+from sklearn.model_selection import StratifiedKFold, GridSearchCV, train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+import joblib # For saving/loading models
+from sklearn.metrics import classification_report
 
 load_dotenv()
 
-DB_URL = os.getenv("DB_CONN_STR")
-
 # --- Download NLTK data ---
+# Ensure NLTK data is downloaded once
 try:
     nltk.data.find('tokenizers/punkt')
 except nltk.downloader.DownloadError:
-    nltk.download('punkt')
+    nltk.download('punkt', quiet=True)
 try:
     nltk.data.find('corpora/stopwords')
 except nltk.downloader.DownloadError:
-    nltk.download('stopwords')
+    nltk.download('stopwords', quiet=True)
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-# Silence noisy HTTPX logs from simpleaichat/openai
+# Silence noisy HTTPX logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
 CSV_PATH = 'socioeconomic_dreams.csv'
-ENV_PATH = '.env'
+ENV_PATH = '.env' # This is typically used by load_dotenv(), not directly in script usually
+GRIDSEARCH_RESULTS_PATH = 'cache/gridsearch_results.joblib'
 RANDOM_STATE = 42
 N_SPLITS = 5 # For cross-validation
 CATEGORIES = ['blue_collar', 'gig_worker', 'white_collar']
@@ -38,23 +54,35 @@ def parse_embedding(embedding_str):
         logging.warning(f"Could not parse embedding string: {embedding_str[:50]}... Error: {e}")
         return None
 
-def load_dreams(path:str):
+def load_dreams(path: str):
     logging.info(f"Loading data from {path}...")
     try:
-        df = pd.read_csv(df, index_col=0)
+        df = pd.read_csv(path)
         # Ensure 'embedding' column is parsed correctly if it's stored as a string
-        if 'embedding' in df.columns and isinstance(df['embedding'].iloc[0], str):
-             logging.info("Parsing string embeddings in synesthesia data...")
-             df['embedding'] = df['embedding'].apply(parse_embedding)
-             # Drop rows where embedding parsing failed
-             original_len = len(df)
-             df = df.dropna(subset=['embedding'])
-             if len(df) < original_len:
-                 logging.warning(f"Dropped {original_len - len(df)} rows due to embedding parsing errors.")
+        if 'embedding' in df.columns:
+            # Check if parsing is needed (e.g., if first non-NA embedding is a string)
+            first_embedding = df['embedding'].dropna().iloc[0] if not df['embedding'].dropna().empty else None
+            if isinstance(first_embedding, str):
+                logging.info("Parsing string embeddings in data...")
+                df['embedding'] = df['embedding'].apply(parse_embedding)
+                # Drop rows where embedding parsing failed
+                original_len = len(df)
+                df = df.dropna(subset=['embedding'])
+                if len(df) < original_len:
+                    logging.warning(f"Dropped {original_len - len(df)} rows due to embedding parsing errors.")
+            # Ensure embeddings are numpy arrays of consistent shape, fill None with np.nan for consistent stacking later
+            # This step might be better handled before passing to ML model, to decide strategy for missing embeddings
+            df['embedding'] = df['embedding'].apply(lambda x: x if isinstance(x, np.ndarray) else np.nan)
 
-    df = pd.read_csv(path)
-    df['n_categories']=df[['blue_collar','gig_worker','white_collar']].sum(axis=1)
-    return df
+
+        df['n_categories'] = df[CATEGORIES].sum(axis=1)
+        return df
+    except FileNotFoundError:
+        logging.error(f"File not found at {path}. Please ensure '{path}' exists.")
+        raise
+    except Exception as e:
+        logging.error(f"Error loading or initially processing data from {path}: {e}")
+        raise
 
 def analyze_and_clean(df:pd.DataFrame):
     '''
@@ -89,97 +117,158 @@ def analyze_and_clean(df:pd.DataFrame):
     # stacked bar chart showing dream counts by category by year
     # overlapping: number of users by n_categories
 
-    # then cleanup:
-    # remove records where n_categories>1
+    # --- Placeholder for detailed EDA ---
+    logging.info("Performing initial EDA on the dataset...")
+    # logging.info(f"Dataset shape: {df.shape}")
+    # logging.info(f"Number of dreams: {len(df)}")
+    # logging.info(f"Number of dreams with embeddings: {df['embedding'].notna().sum()}")
+    # logging.info(f"Number of unique authors: {df['author'].nunique()}")
+    # logging.info("Distribution of n_categories:\n" + str(df['n_categories'].value_counts()))
+    # for cat in CATEGORIES:
+    #     logging.info(f"Dream counts for {cat}: {df[cat].sum()}")
+    # Add more EDA: user counts by category, dream counts by year, etc.
+    # Visualizations would typically go here (e.g., matplotlib, seaborn)
 
-    # then re-run the above stats with new dataset
+    # Cleanup: remove records where n_categories > 1 (i.e., keep only n_categories == 1)
+    original_count = len(df)
+    df = df[df['n_categories'] == 1].copy() # Use .copy() to avoid SettingWithCopyWarning
+    logging.info(f"Removed {original_count - len(df)} records with n_categories > 1. New dataset size: {len(df)}")
 
-    # create multiclass y var
-    df['y'] = df[['blue_collar', 'gig_worker', 'white_collar']].idxmax(axis=1)
+    if df.empty:
+        logging.error("DataFrame is empty after filtering for n_categories == 1. Cannot proceed.")
+        raise ValueError("No data remaining after filtering for single category assignment.")
+
+    # --- Placeholder for re-running EDA on cleaned dataset ---
+    # logging.info("Performing EDA on the cleaned dataset...")
+    # ... (similar EDA calls as above) ...
+
+    # Create multiclass y var
+    # Ensure that after filtering, each row has exactly one category marked as 1
+    df['y'] = df[CATEGORIES].idxmax(axis=1)
+    logging.info(f"Created target variable 'y'. Value counts:\n{df['y'].value_counts(dropna=False)}")
+
     # return the cleaned dataframe
     return df
 
-def cleanup(df:pd.DataFrame):
-    '''Prepare dream dataset for modeling, logging changes to the dataframe'''
-    pass
-    # remove the dreams of users who belong to more than one dataset
 
-def analyze_tfidf_deciles(df):
-    """ Performs TF-IDF analysis on top vs bottom deciles and asks LLM for themes. """
+def analyze_tfidf_for_category(df_full: pd.DataFrame, X_embeddings_full: np.ndarray, model, target_category: str, text_column_name: str = 'dream'):
+    """
+    Performs TF-IDF analysis for a specific target_category using a one-vs-rest approach
+    based on model prediction probabilities. Asks LLM for themes.
+    """
+    logging.info(f"--- Running TF-IDF analysis for category: {target_category} ---")
 
-    # TODO: fix this so that it handles the multiclass properly
-
-    logging.info("Running TF-IDF analysis on top/bottom deciles...")
-    if 'score_decile' not in df.columns:
-        logging.error("DataFrame must have 'score_decile' column for TF-IDF analysis.")
+    if text_column_name not in df_full.columns:
+        logging.error(f"DataFrame must have '{text_column_name}' column for TF-IDF analysis.")
+        return
+    if df_full[text_column_name].isnull().all():
+        logging.error(f"The '{text_column_name}' column contains all null values.")
         return
 
     try:
-        # Preprocessing
-        stop_words = set(stopwords.words('english'))
-        # Ensure text column exists and handle potential NaN values
-        if 'text' not in df.columns:
-             logging.error("DataFrame must have 'text' column.")
-             return
-        df['processed_text'] = df['text'].fillna('').apply(
-            lambda x: ' '.join([word.lower() for word in word_tokenize(str(x)) if word.isalpha() and word.lower() not in stop_words])
-        )
+        # Get model's class order to map probabilities correctly
+        model_classes = list(model.classes_)
+        if target_category not in model_classes:
+            logging.error(f"Target category '{target_category}' not found in model classes: {model_classes}")
+            return
+        target_category_idx = model_classes.index(target_category)
 
-        # Fit TF-IDF Vectorizer
-        vectorizer = TfidfVectorizer(max_features=5000) # Limit features for performance
-        tfidf_matrix = vectorizer.fit_transform(df['processed_text'])
-        feature_names = vectorizer.get_feature_names_out()
+        # Predict probabilities on the full dataset's embeddings
+        # Ensure X_embeddings_full is correctly scaled if the model pipeline expects it
+        # If model is a pipeline, it handles scaling. If it's just LogisticRegression, scaling needs to be done before.
+        # Assuming 'model' is the fitted pipeline from find_best_model, it will handle scaling.
+        all_probas = model.predict_proba(X_embeddings_full)
+        target_probas = all_probas[:, target_category_idx]
 
-        # Get indices for top and bottom deciles
-        bottom_decile_indices = df[df['score_decile'] == 0].index
-        top_decile_indices = df[df['score_decile'] == df['score_decile'].max()].index # Use max() in case of fewer than 10 deciles
+        # Define "top" group (high probability for target_category) vs "rest"
+        # Using a threshold, e.g., top 25% percentile of probabilities for this category
+        # Or simply compare rows where predicted class IS target_category vs. IS NOT.
+        # For simplicity with TF-IDF, let's use predicted class.
+        df_full['predicted_class_for_tfidf'] = model.predict(X_embeddings_full)
 
-        if len(bottom_decile_indices) == 0 or len(top_decile_indices) == 0:
-            logging.warning("Not enough data in top or bottom deciles for TF-IDF analysis.")
+        top_indices = df_full[df_full['predicted_class_for_tfidf'] == target_category].index
+        bottom_indices = df_full[df_full['predicted_class_for_tfidf'] != target_category].index
+
+        if len(top_indices) == 0:
+            logging.warning(f"No dreams predicted as '{target_category}'. Skipping TF-IDF for this category.")
+            return
+        if len(bottom_indices) == 0:
+            logging.warning(f"All dreams predicted as '{target_category}'. Cannot perform differential TF-IDF. Skipping.")
             return
 
-        # Calculate mean TF-IDF for each decile
-        bottom_tfidf_mean = np.array(tfidf_matrix[bottom_decile_indices].mean(axis=0)).flatten()
-        top_tfidf_mean = np.array(tfidf_matrix[top_decile_indices].mean(axis=0)).flatten()
+        # Preprocessing text
+        stop_words = set(stopwords.words('english'))
+        df_full['processed_text'] = df_full[text_column_name].fillna('').astype(str).apply(
+            lambda x: ' '.join([word.lower() for word in word_tokenize(x) if word.isalpha() and word.lower() not in stop_words])
+        )
 
-        # Create comparison DataFrame
+        vectorizer = TfidfVectorizer(max_features=5000)
+        # Fit on all processed text to have a common vocabulary
+        tfidf_matrix = vectorizer.fit_transform(df_full['processed_text'])
+        feature_names = vectorizer.get_feature_names_out()
+
+        # Calculate mean TF-IDF for the two groups
+        # Ensure indices are valid for the tfidf_matrix (if df_full was filtered/reindexed)
+        # We use .loc[index].index to get positional indices if df_full.index is not default 0..N-1
+        # However, tfidf_matrix rows correspond to df_full's original 0..N-1 order if not reindexed after processing.
+        # Assuming df_full maintains original indexing or tfidf_matrix is built on a version of df_full
+        # that aligns with top_indices and bottom_indices.
+        # A safer way: get boolean masks.
+        top_mask = (df_full['predicted_class_for_tfidf'] == target_category)
+        bottom_mask = (df_full['predicted_class_for_tfidf'] != target_category)
+
+        # Check if masks align with tfidf_matrix shape
+        if tfidf_matrix.shape[0] != len(df_full):
+             logging.error("Mismatch between TF-IDF matrix rows and DataFrame rows. TF-IDF cannot be reliably performed.")
+             # This can happen if df_full was modified (e.g. rows dropped) AFTER 'processed_text' was created
+             # and BEFORE this point, without re-calculating processed_text and tfidf_matrix.
+             # For this flow, df_full is passed and processed_text is created on it, so it should align.
+             return
+
+        top_tfidf_mean = np.array(tfidf_matrix[top_mask].mean(axis=0)).flatten()
+        bottom_tfidf_mean = np.array(tfidf_matrix[bottom_mask].mean(axis=0)).flatten()
+
+
         comparison_df = pd.DataFrame({
             'feature': feature_names,
-            'bottom_mean_tfidf': bottom_tfidf_mean,
-            'top_mean_tfidf': top_tfidf_mean
+            'target_category_mean_tfidf': top_tfidf_mean,
+            'other_categories_mean_tfidf': bottom_tfidf_mean
         })
-        comparison_df['diff_top_bottom'] = comparison_df['top_mean_tfidf'] - comparison_df['bottom_mean_tfidf']
+        comparison_df[f'diff_{target_category}_vs_others'] = comparison_df['target_category_mean_tfidf'] - comparison_df['other_categories_mean_tfidf']
 
-        # Get top N differentiating words
-        n_words = 50
-        top_words = comparison_df.sort_values('diff_top_bottom', ascending=False).head(n_words)['feature'].tolist()
-        bottom_words = comparison_df.sort_values('diff_top_bottom', ascending=True).head(n_words)['feature'].tolist()
+        n_words = 20 # Reduced for clarity per category
+        top_words_for_category = comparison_df.sort_values(f'diff_{target_category}_vs_others', ascending=False).head(n_words)['feature'].tolist()
+        # Words more associated with "others" when compared to target_category
+        # bottom_words_for_category = comparison_df.sort_values(f'diff_{target_category}_vs_others', ascending=True).head(n_words)['feature'].tolist()
 
-        logging.info(f"Top {n_words} words associated with HIGH scores (Synesthesia):\n{', '.join(top_words)}")
-        logging.info(f"Top {n_words} words associated with LOW scores (Baseline):\n{', '.join(bottom_words)}")
+
+        logging.info(f"Top {n_words} words most strongly associated with '{target_category}' (vs other categories):\n{', '.join(top_words_for_category)}")
+        # logging.info(f"Top {n_words} words most strongly associated with OTHER categories (vs '{target_category}'):\n{', '.join(bottom_words_for_category)}")
+
 
         # LLM Analysis for Theming
         try:
-            ai = AIChat(console=False, model='gpt-4o', api_key=os.getenv("OPENAI_API_KEY"))
-            prompt_top = f"""The following words are most strongly associated with dreams from subreddit A (compared to subreddit B). Please group these words into meaningful semantic themes (3-5 themes usually works well). Provide only the theme names and the words belonging to each theme.
+            ai = AIChat(console=False, model='gpt-4o', api_key=os.getenv("OPENAI_API_KEY")) # Ensure API key is loaded
+            prompt_category_themes = f"""The following words are most strongly associated with dreams classified as '{target_category}' when compared to dreams from other categories. Please group these words into meaningful semantic themes (2-4 themes usually works well). Provide only the theme names and the words belonging to each theme.
 
-Words: {', '.join(top_words)}"""
-            response_top = ai(prompt_top)
-            logging.info(f"LLM Theming for HIGH score words:\n{response_top}")
-
-            prompt_bottom = f"""The following words are most strongly associated with dreams from subreddit B (compared to subreddit A). Please group these words into meaningful semantic themes (3-5 themes usually works well). Provide only the theme names and the words belonging to each theme.
-
-Words: {', '.join(bottom_words)}"""
-            response_bottom = ai(prompt_bottom)
-            logging.info(f"LLM Theming for LOW score words:\n{response_bottom}")
+Words: {', '.join(top_words_for_category)}"""
+            response_themes = ai(prompt_category_themes)
+            logging.info(f"LLM Theming for '{target_category}' associated words:\n{response_themes}")
 
         except ImportError:
-            logging.warning("simpleaichat not installed. Skipping LLM theming for TF-IDF words.")
+            logging.warning("simpleaichat not installed or OPENAI_API_KEY not set. Skipping LLM theming.")
         except Exception as e:
-            logging.error(f"Error during LLM theming for TF-IDF words: {e}")
+            logging.error(f"Error during LLM theming for '{target_category}': {e}")
 
     except Exception as e:
-        logging.error(f"Error during TF-IDF analysis: {e}")
+        logging.error(f"Error during TF-IDF analysis for category '{target_category}': {e}")
+    finally:
+        # Clean up temporary columns if added
+        if 'processed_text' in df_full.columns:
+            df_full.drop(columns=['processed_text'], inplace=True)
+        if 'predicted_class_for_tfidf' in df_full.columns:
+            df_full.drop(columns=['predicted_class_for_tfidf'], inplace=True)
+
 
 def find_best_model(X, y, n_splits=N_SPLITS):
     """
@@ -272,12 +361,91 @@ def find_best_model(X, y, n_splits=N_SPLITS):
 
     return best_pipeline
 
-def evaluate_performance(model):
-    '''Demonstrate how this model performs in putting people into each class'''
-    pass
+def evaluate_performance(model, X_test, y_test, target_names=None):
+    '''Demonstrates model performance on the test set.'''
+    logging.info("--- Evaluating Model Performance on Test Set ---")
+    if not hasattr(model, 'predict'):
+        logging.error("Provided model object does not have a 'predict' method.")
+        return
+
+    try:
+        y_pred = model.predict(X_test)
+        report = classification_report(y_test, y_pred, target_names=target_names, zero_division=0)
+        logging.info("Classification Report:\n" + report)
+        # Potentially: Add confusion matrix, ROC AUC scores per class, etc.
+    except Exception as e:
+        logging.error(f"Error during model evaluation: {e}")
+
 def main():
+    # Ensure cache directory exists
+    os.makedirs(os.path.dirname(GRIDSEARCH_RESULTS_PATH), exist_ok=True)
+
     df = load_dreams(CSV_PATH)
+    if df.empty:
+        logging.error("Loaded dataframe is empty. Exiting.")
+        return
+
     df = analyze_and_clean(df)
+    if df.empty or 'y' not in df.columns or 'embedding' not in df.columns:
+        logging.error("DataFrame is unsuitable for modeling after cleaning (empty or missing 'y'/'embedding'). Exiting.")
+        return
+    
+    # Drop rows where 'embedding' is NaN before splitting, as these cannot be used by the model
+    df.dropna(subset=['embedding'], inplace=True)
+    if df.empty:
+        logging.error("DataFrame is empty after dropping NaN embeddings. Exiting.")
+        return
+        
+    # Prepare data for modeling
+    # Convert 'created_utc' to datetime for time-based split
+    if 'created_utc' not in df.columns:
+        logging.error("'created_utc' column missing, cannot perform time-based split. Consider random split or ensure column exists.")
+        # Fallback to random split or raise error
+        # For now, let's assume it exists or proceed with caution. A robust solution would handle this.
+        # If we must proceed without it, a random split is an option:
+        # X_train, X_test, y_train, y_test = train_test_split(
+        #     np.vstack(df['embedding'].values), df['y'], test_size=0.2, random_state=RANDOM_STATE, stratify=df['y']
+        # )
+        # However, the request was for time-based.
+        raise ValueError("'created_utc' column is required for time-based splitting but not found.")
+
+    df['created_utc'] = pd.to_datetime(df['created_utc'])
+    df = df.sort_values(by='created_utc')
+
+    # Stack embeddings into a numpy array
+    X_full = np.vstack(df['embedding'].values) # Embeddings for the entire dataset (after cleaning and NaN drop)
+    y_full = df['y'] # Labels for the entire dataset
+
+    # Split data: 80% train, 20% test based on time
+    # Using train_test_split with shuffle=False after sorting by time achieves a time-based split
+    # where earlier data is for training and later data for testing.
+    split_index = int(len(df) * 0.8)
+    
+    X_train = X_full[:split_index]
+    y_train = y_full.iloc[:split_index]
+    X_test = X_full[split_index:]
+    y_test = y_full.iloc[split_index:]
+
+    if len(X_train) == 0 or len(X_test) == 0:
+        logging.error("Training or testing set is empty after split. Check data size and split logic.")
+        return
+
+    logging.info(f"Training set size: {len(X_train)}, Test set size: {len(X_test)}")
+    
+    model = find_best_model(X_train, y_train) # find_best_model uses N_SPLITS for CV on training data
+
+    evaluate_performance(model, X_test, y_test, target_names=CATEGORIES)
+
+    # TF-IDF analysis on the full dataset for each category
+    logging.info("--- Starting TF-IDF Analysis for each category on the full dataset ---")
+    # The df for analyze_tfidf_for_category should be the one used to generate X_full and y_full
+    # which is 'df' after cleaning, sorting, and dropping NaN embeddings.
+    for category in CATEGORIES:
+        analyze_tfidf_for_category(df.copy(), X_full, model, target_category=category, text_column_name='dream')
+    
+    logging.info("--- Script Finished ---")
+
+if __name__ == '__main__':
     # split data into 80% train %20 test - using the last 20% of created_utc records as test
     # train, test = 
     pass
