@@ -796,15 +796,29 @@ def cluster_top_words_for_themes(
 
             # Get topic information
             topic_info = topic_model.get_topic_info()
-            logging.info(f"Found {len(topic_info) - topic_info['Topic'].isin([-1]).sum()} topics for '{category_name}'.")
+            num_actual_topics = len(topic_info) - topic_info['Topic'].isin([-1]).sum()
+            logging.info(f"Found {num_actual_topics} themes (topics) for '{category_name}'.")
 
-            for index, row in topic_info.iterrows():
-                topic_id = row['Topic']
-                if topic_id == -1: # Outlier topic
-                    logging.info(f"  Outliers (words not in any specific theme): {row['Name']} (Count: {row['Count']})")
+            # Create a mapping of each word to its assigned topic
+            word_to_topic_map = {word: topic_id for word, topic_id in zip(words_for_bertopic, topics)}
+            
+            # Group words by their assigned topic ID
+            themes_with_all_words = {}
+            for word, topic_id in word_to_topic_map.items():
+                if topic_id not in themes_with_all_words:
+                    themes_with_all_words[topic_id] = []
+                themes_with_all_words[topic_id].append(word)
+
+            # Log the themes with all their words
+            for topic_id in sorted(themes_with_all_words.keys()):
+                theme_words = themes_with_all_words[topic_id]
+                # Get the representative name for the topic from topic_info
+                topic_name_info = topic_info[topic_info['Topic'] == topic_id]['Name'].iloc[0] if not topic_info[topic_info['Topic'] == topic_id].empty else f"Topic {topic_id}"
+                
+                if topic_id == -1:
+                    logging.info(f"  Outliers (words not in any specific theme - {topic_name_info}): {', '.join(theme_words)}")
                 else:
-                    # 'Name' column in topic_info usually contains representative words for the topic
-                    logging.info(f"  Theme (Topic {topic_id}): {row['Name']} (Representative words: {topic_model.get_topic(topic_id)}) (Count: {row['Count']})")
+                    logging.info(f"  Theme (Topic {topic_id} - {topic_name_info}): {', '.join(theme_words)}")
             
             # Reset BERTopic model for the next category to avoid interference,
             # as fit_transform can modify internal state.
