@@ -20,7 +20,8 @@ from openai import OpenAI
 import matplotlib.pyplot as plt
 from itertools import cycle
 from sentence_transformers import SentenceTransformer
-import hdbscan # For HDBSCAN clustering
+from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors
 
 load_dotenv()
 
@@ -728,17 +729,94 @@ def calculate_and_save_class_tfidf_scores(
     except Exception as e:
         logging.error(f"Failed to save class TF-IDF scores: {e}")
 
+def _calculate_point_line_distance(point, line_start, line_end):
+    """Calculates the perpendicular distance from a point to a line segment."""
+    if np.all(line_start == line_end):
+        return np.linalg.norm(point - line_start)
+    
+    line_vec = line_end - line_start
+    point_vec = point - line_start
+    line_len_sq = np.dot(line_vec, line_vec)
+    
+    t = np.dot(point_vec, line_vec) / line_len_sq
+    t = np.clip(t, 0, 1) # Project onto the segment
+    
+    closest_point_on_line = line_start + t * line_vec
+    return np.linalg.norm(point - closest_point_on_line)
+
+def _estimate_dbscan_eps(embeddings, min_samples, metric='cosine'):
+    """Estimates a good eps value for DBSCAN using the k-distance graph elbow method."""
+    if len(embeddings) < min_samples:
+        logging.warning(f"Not enough samples ({len(embeddings)}) to estimate eps for min_samples={min_samples}. Returning default eps.")
+        return 0.5 # Default fallback eps
+
+    nn = NearestNeighbors(n_neighbors=min_samples, metric=metric)
+    nn.fit(embeddings)
+    # distances are to the k-th neighbor (min_samples includes the point itself, so k = min_samples-1 index)
+    distances, _ = nn.kneighbors(embeddings) 
+    k_distances = np.sort(distances[:, min_samples-1], axis=0)
+
+    if len(k_distances) < 2: # Need at least two points to form a line
+        logging.warning("Not enough k-distances to determine elbow. Returning default eps.")
+        return 0.5
+
+    # Create points for the k-distance curve (index, distance)
+    indices = np.arange(len(k_distances))
+    curve_points = np.vstack((indices, k_distances)).T
+
+    line_start_pt = curve_points[0]
+    line_end_pt = curve_points[-1]
+
+    if np.all(line_start_pt == line_end_pt): # All distances are the same
+        return k_distances[0] if k_distances[0] > 0 else 0.5
+
+
+    # Calculate perpendicular distance of each point to the line connecting start and end of curve
+    # This is a simplified way to find the "knee" or "elbow"
+    # We are looking for the point on the curve (indices[i], k_distances[i])
+    # that is furthest from the line connecting (indices[0], k_distances[0]) and (indices[-1], k_distances[-1])
+    
+    # Line defined by P1=(x1,y1) and P2=(x2,y2) is (y1-y2)x + (x2-x1)y + (x1y2-x2y1) = 0
+    # A = y1-y2, B = x2-x1, C = x1y2-x2y1
+    x1, y1 = indices[0], k_distances[0]
+    x2, y2 = indices[-1], k_distances[-1]
+
+    # Handle vertical line case (all indices are same, should not happen with np.arange)
+    # Handle horizontal line case (all k_distances are same)
+    if x1 == x2: # Should not happen
+        return np.median(k_distances) 
+    if y1 == y2: # All k-distances are the same, any point is fine, or just use the distance
+        return y1 if y1 > 1e-6 else 0.5 # Avoid eps=0
+
+    line_A = y1 - y2
+    line_B = x2 - x1
+    line_C = x1 * y2 - x2 * y1
+    
+    norm_factor = np.sqrt(line_A**2 + line_B**2)
+    if norm_factor == 0: # Should be caught by y1==y2 or x1==x2
+        return np.median(k_distances)
+
+    perp_distances = np.abs(line_A * indices + line_B * k_distances + line_C) / norm_factor
+    
+    elbow_index = np.argmax(perp_distances)
+    estimated_eps = k_distances[elbow_index]
+    
+    logging.info(f"Estimated DBSCAN eps: {estimated_eps:.4f} at index {elbow_index} from k-distance plot.")
+    # Ensure eps is not too small, e.g., if all distances are tiny
+    return max(estimated_eps, 1e-3)
+
+
 def cluster_top_words_for_themes(
     tfidf_scores_path: str = CLASS_TFIDF_SCORES_PATH,
     top_n_words: int = 50,
-    min_cluster_size: int = 5, # HDBSCAN parameter
+    min_samples: int = 3, # DBSCAN parameter, min words to form a dense region (theme)
     embedding_model_name: str = 'all-MiniLM-L6-v2' # Efficient and good quality RoBERTa-based model
 ):
     """
     Loads TF-IDF scores, identifies top differentiating words for each class,
-    embeds them, and clusters them using HDBSCAN to find semantic themes.
+    embeds them, and clusters them using DBSCAN with auto-tuned eps to find semantic themes.
     """
-    logging.info(f"--- Clustering top {top_n_words} words for themes using HDBSCAN (min_cluster_size={min_cluster_size}, metric='cosine') and {embedding_model_name} ---")
+    logging.info(f"--- Clustering top {top_n_words} words for themes using DBSCAN (auto-eps, min_samples={min_samples}) and {embedding_model_name} ---")
 
     if not os.path.exists(tfidf_scores_path):
         logging.error(f"TF-IDF scores file not found at {tfidf_scores_path}. Cannot perform word clustering.")
@@ -773,10 +851,8 @@ def cluster_top_words_for_themes(
             
         words_to_cluster = top_words_df['feature'].tolist()
 
-        # HDBSCAN's min_cluster_size is a key parameter. 
-        # The number of samples should ideally be greater than min_cluster_size.
-        if len(words_to_cluster) < min_cluster_size: 
-            logging.warning(f"Category '{category_name}' has only {len(words_to_cluster)} top words, which is less than min_cluster_size ({min_cluster_size}). Skipping HDBSCAN clustering for this category.")
+        if len(words_to_cluster) < min_samples: 
+            logging.warning(f"Category '{category_name}' has only {len(words_to_cluster)} top words, which is less than DBSCAN min_samples ({min_samples}). Skipping clustering for this category.")
             continue
         
         logging.info(f"\n--- Themes for Category: {category_name} (Top {len(words_to_cluster)} words) ---")
@@ -787,15 +863,19 @@ def cluster_top_words_for_themes(
             logging.error(f"Failed to encode words for category '{category_name}': {e}")
             continue
 
-        # Perform HDBSCAN clustering
-        # Using 'euclidean' metric on L2-normalized embeddings is equivalent to clustering by cosine similarity.
-        # SentenceTransformer models like 'all-MiniLM-L6-v2' typically output normalized embeddings.
-        # allow_single_cluster=True can be useful if sometimes only one dominant theme is found.
-        hdbscan_clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, metric='euclidean', allow_single_cluster=True)
+        # Estimate eps for DBSCAN
+        estimated_eps = _estimate_dbscan_eps(word_embeddings, min_samples, metric='cosine')
+        if estimated_eps is None: # Fallback if estimation failed
+            logging.warning(f"Could not estimate eps for '{category_name}', using default 0.5.")
+            estimated_eps = 0.5
+
+
+        # Perform DBSCAN clustering
+        dbscan_clusterer = DBSCAN(eps=estimated_eps, min_samples=min_samples, metric='cosine')
         try:
-            cluster_labels = hdbscan_clusterer.fit_predict(word_embeddings)
+            cluster_labels = dbscan_clusterer.fit_predict(word_embeddings)
         except Exception as e:
-            logging.error(f"HDBSCAN clustering failed for category '{category_name}': {e}")
+            logging.error(f"DBSCAN clustering failed for category '{category_name}': {e}")
             continue
 
         # Group words by cluster
