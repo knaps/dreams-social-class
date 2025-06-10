@@ -22,6 +22,7 @@ from itertools import cycle
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import DBSCAN
 from sklearn.neighbors import NearestNeighbors
+from kneed import KneeLocator
 
 load_dotenv()
 
@@ -771,37 +772,39 @@ def _estimate_dbscan_eps(embeddings, min_samples, metric='cosine'):
         return k_distances[0] if k_distances[0] > 0 else 0.5
 
 
-    # Calculate perpendicular distance of each point to the line connecting start and end of curve
-    # This is a simplified way to find the "knee" or "elbow"
-    # We are looking for the point on the curve (indices[i], k_distances[i])
-    # that is furthest from the line connecting (indices[0], k_distances[0]) and (indices[-1], k_distances[-1])
-    
-    # Line defined by P1=(x1,y1) and P2=(x2,y2) is (y1-y2)x + (x2-x1)y + (x1y2-x2y1) = 0
-    # A = y1-y2, B = x2-x1, C = x1y2-x2y1
-    x1, y1 = indices[0], k_distances[0]
-    x2, y2 = indices[-1], k_distances[-1]
+    # Use Kneedle algorithm to find the elbow
+    try:
+        # The k-distance plot is typically convex and increasing.
+        # S is a sensitivity parameter; 1.0 is a common default.
+        kneedle = KneeLocator(indices, k_distances, S=1.0, curve='convex', direction='increasing', online=False)
+        
+        if kneedle.knee_y is not None:
+            estimated_eps = kneedle.knee_y
+            elbow_index = kneedle.knee # This is the x-value (index) of the knee
+            logging.info(f"Kneedle estimated DBSCAN eps: {estimated_eps:.4f} at index {elbow_index} from k-distance plot.")
+            # Optionally, save the plot for inspection:
+            # if kneedle.plot_knee(): plt.savefig(f"cache/kneedle_plot_{np.random.randint(1000)}.png"); plt.close()
+        else:
+            logging.warning("Kneedle could not find a knee. Falling back to max perpendicular distance method.")
+            # Fallback to the previous method if Kneedle fails (though less likely with good data)
+            # This part can be simplified or removed if Kneedle is robust enough
+            x1, y1 = indices[0], k_distances[0]
+            x2, y2 = indices[-1], k_distances[-1]
+            if x1 == x2 or y1 == y2: # Simplified fallback
+                estimated_eps = np.median(k_distances) if len(k_distances) > 0 else 0.5
+            else:
+                line_A = y1 - y2; line_B = x2 - x1; line_C = x1 * y2 - x2 * y1
+                norm_factor = np.sqrt(line_A**2 + line_B**2)
+                if norm_factor == 0: norm_factor = 1.0 # Avoid division by zero
+                perp_distances = np.abs(line_A * indices + line_B * k_distances + line_C) / norm_factor
+                elbow_index = np.argmax(perp_distances)
+                estimated_eps = k_distances[elbow_index]
+            logging.info(f"Fallback estimated DBSCAN eps: {estimated_eps:.4f}.")
 
-    # Handle vertical line case (all indices are same, should not happen with np.arange)
-    # Handle horizontal line case (all k_distances are same)
-    if x1 == x2: # Should not happen
-        return np.median(k_distances) 
-    if y1 == y2: # All k-distances are the same, any point is fine, or just use the distance
-        return y1 if y1 > 1e-6 else 0.5 # Avoid eps=0
+    except Exception as e_kneedle:
+        logging.error(f"Error during Kneedle eps estimation: {e_kneedle}. Using median k-distance as fallback.")
+        estimated_eps = np.median(k_distances) if len(k_distances) > 0 else 0.5
 
-    line_A = y1 - y2
-    line_B = x2 - x1
-    line_C = x1 * y2 - x2 * y1
-    
-    norm_factor = np.sqrt(line_A**2 + line_B**2)
-    if norm_factor == 0: # Should be caught by y1==y2 or x1==x2
-        return np.median(k_distances)
-
-    perp_distances = np.abs(line_A * indices + line_B * k_distances + line_C) / norm_factor
-    
-    elbow_index = np.argmax(perp_distances)
-    estimated_eps = k_distances[elbow_index]
-    
-    logging.info(f"Estimated DBSCAN eps: {estimated_eps:.4f} at index {elbow_index} from k-distance plot.")
     # Ensure eps is not too small, e.g., if all distances are tiny
     return max(estimated_eps, 1e-3)
 
