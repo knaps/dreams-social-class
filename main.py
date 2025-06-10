@@ -809,7 +809,7 @@ def _estimate_dbscan_eps(embeddings, min_samples, metric='cosine'):
 def cluster_top_words_for_themes(
     tfidf_scores_path: str = CLASS_TFIDF_SCORES_PATH,
     top_n_words: int = 50,
-    min_samples: int = 3, # DBSCAN parameter, min words to form a dense region (theme)
+    min_samples: int = 4, # DBSCAN parameter, min words to form a dense region (theme). Increased from 3.
     embedding_model_name: str = 'all-MiniLM-L6-v2' # Efficient and good quality RoBERTa-based model
 ):
     """
