@@ -788,10 +788,10 @@ def cluster_top_words_for_themes(
             continue
 
         # Perform HDBSCAN clustering
-        # HDBSCAN can sometimes be sensitive to the scale of distances, 
-        # 'cosine' metric is good for normalized embeddings.
+        # Using 'euclidean' metric on L2-normalized embeddings is equivalent to clustering by cosine similarity.
+        # SentenceTransformer models like 'all-MiniLM-L6-v2' typically output normalized embeddings.
         # allow_single_cluster=True can be useful if sometimes only one dominant theme is found.
-        hdbscan_clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, metric='cosine', allow_single_cluster=True)
+        hdbscan_clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, metric='euclidean', allow_single_cluster=True)
         try:
             cluster_labels = hdbscan_clusterer.fit_predict(word_embeddings)
         except Exception as e:
