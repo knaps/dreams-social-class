@@ -20,9 +20,7 @@ from openai import OpenAI
 import matplotlib.pyplot as plt
 from itertools import cycle
 from sentence_transformers import SentenceTransformer
-from sklearn.cluster import DBSCAN
-from sklearn.neighbors import NearestNeighbors
-from kneed import KneeLocator
+from bertopic import BERTopic # For BERTopic modeling
 
 load_dotenv()
 
@@ -730,21 +728,6 @@ def calculate_and_save_class_tfidf_scores(
     except Exception as e:
         logging.error(f"Failed to save class TF-IDF scores: {e}")
 
-def _calculate_point_line_distance(point, line_start, line_end):
-    """Calculates the perpendicular distance from a point to a line segment."""
-    if np.all(line_start == line_end):
-        return np.linalg.norm(point - line_start)
-    
-    line_vec = line_end - line_start
-    point_vec = point - line_start
-    line_len_sq = np.dot(line_vec, line_vec)
-    
-    t = np.dot(point_vec, line_vec) / line_len_sq
-    t = np.clip(t, 0, 1) # Project onto the segment
-    
-    closest_point_on_line = line_start + t * line_vec
-    return np.linalg.norm(point - closest_point_on_line)
-
 def _estimate_dbscan_eps(embeddings, min_samples, metric='cosine'):
     """Estimates a good eps value for DBSCAN using the k-distance graph elbow method."""
     if len(embeddings) < min_samples:
@@ -806,20 +789,17 @@ def _estimate_dbscan_eps(embeddings, min_samples, metric='cosine'):
         estimated_eps = np.median(k_distances) if len(k_distances) > 0 else 0.5
 
     # Ensure eps is not too small, e.g., if all distances are tiny
-    return max(estimated_eps, 1e-3)
-
-
 def cluster_top_words_for_themes(
     tfidf_scores_path: str = CLASS_TFIDF_SCORES_PATH,
     top_n_words: int = 50,
-    min_samples: int = 4, # DBSCAN parameter, min words to form a dense region (theme). Increased from 3.
+    min_topic_size: int = 3, # BERTopic: min words to form a topic/theme
     embedding_model_name: str = 'all-MiniLM-L6-v2' # Efficient and good quality RoBERTa-based model
 ):
     """
     Loads TF-IDF scores, identifies top differentiating words for each class,
     embeds them, and clusters them using DBSCAN with auto-tuned eps to find semantic themes.
     """
-    logging.info(f"--- Clustering top {top_n_words} words for themes using DBSCAN (auto-eps, min_samples={min_samples}) and {embedding_model_name} ---")
+    logging.info(f"--- Clustering top {top_n_words} words for themes using BERTopic (min_topic_size={min_topic_size}) and {embedding_model_name} ---")
 
     if not os.path.exists(tfidf_scores_path):
         logging.error(f"TF-IDF scores file not found at {tfidf_scores_path}. Cannot perform word clustering.")
@@ -831,18 +811,28 @@ def cluster_top_words_for_themes(
         logging.error(f"Failed to load TF-IDF scores from {tfidf_scores_path}: {e}")
         return
 
+    # Initialize BERTopic model with a sentence transformer
+    # Using the same embedding model for consistency if desired, or BERTopic can use its default.
+    # BERTopic handles embedding internally if an embedding_model (string or SentenceTransformer) is passed.
     try:
-        logging.info(f"Loading sentence transformer model: {embedding_model_name}...")
-        model = SentenceTransformer(embedding_model_name)
-        logging.info("Sentence transformer model loaded successfully.")
+        logging.info(f"Initializing BERTopic with embedding model: {embedding_model_name}...")
+        # Pass the SentenceTransformer model directly for more control if needed,
+        # or just the name and let BERTopic handle it.
+        # Using the name directly is simpler for BERTopic's default flow.
+        topic_model = BERTopic(
+            embedding_model=embedding_model_name,
+            min_topic_size=min_topic_size,
+            verbose=False # Set to True for more BERTopic logs
+        )
+        logging.info("BERTopic model initialized.")
     except Exception as e:
-        logging.error(f"Failed to load sentence transformer model '{embedding_model_name}': {e}. Make sure 'sentence-transformers' is installed.")
+        logging.error(f"Failed to initialize BERTopic model: {e}. Make sure 'bertopic' and its dependencies are installed.")
         return
 
     for category_name in CATEGORIES: # Assumes CATEGORIES is globally defined
         diff_col = f'diff_vs_others_{category_name}'
         if diff_col not in df_tfidf.columns:
-            logging.warning(f"Difference column '{diff_col}' not found for category '{category_name}'. Skipping clustering for this category.")
+            logging.warning(f"Difference column '{diff_col}' not found for category '{category_name}'. Skipping BERTopic for this category.")
             continue
 
         # Get top N words for the category based on the difference score
@@ -852,59 +842,53 @@ def cluster_top_words_for_themes(
             logging.warning(f"No top words found or 'feature' column missing for category '{category_name}'. Skipping.")
             continue
             
-        words_to_cluster = top_words_df['feature'].tolist()
+        words_for_bertopic = top_words_df['feature'].tolist()
 
-        if len(words_to_cluster) < min_samples: 
-            logging.warning(f"Category '{category_name}' has only {len(words_to_cluster)} top words, which is less than DBSCAN min_samples ({min_samples}). Skipping clustering for this category.")
+        if len(words_for_bertopic) < min_topic_size: 
+            logging.warning(f"Category '{category_name}' has only {len(words_for_bertopic)} top words, which is less than BERTopic min_topic_size ({min_topic_size}). Skipping BERTopic for this category.")
             continue
         
-        logging.info(f"\n--- Themes for Category: {category_name} (Top {len(words_to_cluster)} words) ---")
+        logging.info(f"\n--- BERTopic Themes for Category: {category_name} (Top {len(words_for_bertopic)} words) ---")
         
         try:
-            word_embeddings = model.encode(words_to_cluster, show_progress_bar=False)
-        except Exception as e:
-            logging.error(f"Failed to encode words for category '{category_name}': {e}")
-            continue
+            # BERTopic expects a list of "documents". Here, each word is a document.
+            # It will embed these words using the specified sentence transformer.
+            topics, _ = topic_model.fit_transform(words_for_bertopic) # We don't need probabilities here
 
-        # Estimate eps for DBSCAN
-        estimated_eps = _estimate_dbscan_eps(word_embeddings, min_samples, metric='cosine')
-        if estimated_eps is None: # Fallback if estimation failed
-            logging.warning(f"Could not estimate eps for '{category_name}', using default 0.5.")
-            estimated_eps = 0.5
+            # Get topic information
+            topic_info = topic_model.get_topic_info()
+            logging.info(f"Found {len(topic_info) - topic_info['Topic'].isin([-1]).sum()} topics for '{category_name}'.")
 
-
-        # Perform DBSCAN clustering
-        dbscan_clusterer = DBSCAN(eps=estimated_eps, min_samples=min_samples, metric='cosine')
-        try:
-            cluster_labels = dbscan_clusterer.fit_predict(word_embeddings)
-        except Exception as e:
-            logging.error(f"DBSCAN clustering failed for category '{category_name}': {e}")
-            continue
-
-        # Group words by cluster
-        num_discovered_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
-        logging.info(f"Discovered {num_discovered_clusters} themes (clusters) for '{category_name}'.")
-
-        clustered_words = {}
-        noise_words = []
-        for word, label in zip(words_to_cluster, cluster_labels):
-            if label == -1:
-                noise_words.append(word)
-            else:
-                if label not in clustered_words:
-                    clustered_words[label] = []
-                clustered_words[label].append(word)
-        
-        sorted_cluster_ids = sorted(clustered_words.keys())
-
-        for cluster_id in sorted_cluster_ids:
-            words_in_cluster = clustered_words[cluster_id]
-            logging.info(f"  Theme (Cluster {cluster_id}): {', '.join(words_in_cluster)}")
-        
-        if noise_words:
-            logging.info(f"  Noise (words not in any theme): {', '.join(noise_words)}")
+            for index, row in topic_info.iterrows():
+                topic_id = row['Topic']
+                if topic_id == -1: # Outlier topic
+                    logging.info(f"  Outliers (words not in any specific theme): {row['Name']} (Count: {row['Count']})")
+                else:
+                    # 'Name' column in topic_info usually contains representative words for the topic
+                    logging.info(f"  Theme (Topic {topic_id}): {row['Name']} (Representative words: {topic_model.get_topic(topic_id)}) (Count: {row['Count']})")
             
-    logging.info("--- Word clustering for themes finished ---")
+            # Reset BERTopic model for the next category to avoid interference,
+            # as fit_transform can modify internal state.
+            # Re-initializing is safer if applying to different small datasets sequentially.
+            topic_model = BERTopic(
+                embedding_model=embedding_model_name,
+                min_topic_size=min_topic_size,
+                verbose=False
+            )
+
+
+        except Exception as e:
+            logging.error(f"BERTopic processing failed for category '{category_name}': {e}")
+            # If BERTopic fails for one category, try to continue with others.
+            # Re-initialize model to be safe for next iteration.
+            topic_model = BERTopic(
+                embedding_model=embedding_model_name,
+                min_topic_size=min_topic_size,
+                verbose=False
+            )
+            continue
+            
+    logging.info("--- BERTopic word theming finished ---")
 
 
 def main():
