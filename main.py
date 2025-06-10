@@ -20,7 +20,7 @@ from openai import OpenAI
 import matplotlib.pyplot as plt
 from itertools import cycle
 from sentence_transformers import SentenceTransformer
-from sklearn.cluster import DBSCAN
+import hdbscan # For HDBSCAN clustering
 
 load_dotenv()
 
@@ -731,16 +731,14 @@ def calculate_and_save_class_tfidf_scores(
 def cluster_top_words_for_themes(
     tfidf_scores_path: str = CLASS_TFIDF_SCORES_PATH,
     top_n_words: int = 50,
-    # DBSCAN parameters - eps might need tuning based on embedding distribution
-    eps: float = 0.5, 
-    min_samples: int = 2, 
+    min_cluster_size: int = 5, # HDBSCAN parameter
     embedding_model_name: str = 'all-MiniLM-L6-v2' # Efficient and good quality RoBERTa-based model
 ):
     """
     Loads TF-IDF scores, identifies top differentiating words for each class,
-    embeds them, and clusters them using DBSCAN to find semantic themes.
+    embeds them, and clusters them using HDBSCAN to find semantic themes.
     """
-    logging.info(f"--- Clustering top {top_n_words} words for themes using DBSCAN (eps={eps}, min_samples={min_samples}) and {embedding_model_name} ---")
+    logging.info(f"--- Clustering top {top_n_words} words for themes using HDBSCAN (min_cluster_size={min_cluster_size}, metric='cosine') and {embedding_model_name} ---")
 
     if not os.path.exists(tfidf_scores_path):
         logging.error(f"TF-IDF scores file not found at {tfidf_scores_path}. Cannot perform word clustering.")
@@ -775,8 +773,10 @@ def cluster_top_words_for_themes(
             
         words_to_cluster = top_words_df['feature'].tolist()
 
-        if len(words_to_cluster) < min_samples: # Need at least min_samples to form any cluster with DBSCAN
-            logging.warning(f"Category '{category_name}' has only {len(words_to_cluster)} top words, which is less than min_samples ({min_samples}). Skipping DBSCAN clustering for this category.")
+        # HDBSCAN's min_cluster_size is a key parameter. 
+        # The number of samples should ideally be greater than min_cluster_size.
+        if len(words_to_cluster) < min_cluster_size: 
+            logging.warning(f"Category '{category_name}' has only {len(words_to_cluster)} top words, which is less than min_cluster_size ({min_cluster_size}). Skipping HDBSCAN clustering for this category.")
             continue
         
         logging.info(f"\n--- Themes for Category: {category_name} (Top {len(words_to_cluster)} words) ---")
@@ -787,12 +787,15 @@ def cluster_top_words_for_themes(
             logging.error(f"Failed to encode words for category '{category_name}': {e}")
             continue
 
-        # Perform DBSCAN clustering
-        dbscan = DBSCAN(eps=eps, min_samples=min_samples, metric='cosine') # Using cosine metric, common for embeddings
+        # Perform HDBSCAN clustering
+        # HDBSCAN can sometimes be sensitive to the scale of distances, 
+        # 'cosine' metric is good for normalized embeddings.
+        # allow_single_cluster=True can be useful if sometimes only one dominant theme is found.
+        hdbscan_clusterer = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, metric='cosine', allow_single_cluster=True)
         try:
-            cluster_labels = dbscan.fit_predict(word_embeddings)
+            cluster_labels = hdbscan_clusterer.fit_predict(word_embeddings)
         except Exception as e:
-            logging.error(f"DBSCAN clustering failed for category '{category_name}': {e}")
+            logging.error(f"HDBSCAN clustering failed for category '{category_name}': {e}")
             continue
 
         # Group words by cluster
