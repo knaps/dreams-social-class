@@ -20,7 +20,7 @@ from openai import OpenAI
 import matplotlib.pyplot as plt
 from itertools import cycle
 from sentence_transformers import SentenceTransformer
-from sklearn.cluster import KMeans
+from sklearn.cluster import DBSCAN
 
 load_dotenv()
 
@@ -731,14 +731,16 @@ def calculate_and_save_class_tfidf_scores(
 def cluster_top_words_for_themes(
     tfidf_scores_path: str = CLASS_TFIDF_SCORES_PATH,
     top_n_words: int = 50,
-    n_clusters: int = 5,
+    # DBSCAN parameters - eps might need tuning based on embedding distribution
+    eps: float = 0.5, 
+    min_samples: int = 2, 
     embedding_model_name: str = 'all-MiniLM-L6-v2' # Efficient and good quality RoBERTa-based model
 ):
     """
     Loads TF-IDF scores, identifies top differentiating words for each class,
-    embeds them, and clusters them to find semantic themes.
+    embeds them, and clusters them using DBSCAN to find semantic themes.
     """
-    logging.info(f"--- Clustering top {top_n_words} words for themes using {embedding_model_name} ---")
+    logging.info(f"--- Clustering top {top_n_words} words for themes using DBSCAN (eps={eps}, min_samples={min_samples}) and {embedding_model_name} ---")
 
     if not os.path.exists(tfidf_scores_path):
         logging.error(f"TF-IDF scores file not found at {tfidf_scores_path}. Cannot perform word clustering.")
@@ -773,8 +775,8 @@ def cluster_top_words_for_themes(
             
         words_to_cluster = top_words_df['feature'].tolist()
 
-        if len(words_to_cluster) < n_clusters:
-            logging.warning(f"Category '{category_name}' has only {len(words_to_cluster)} top words, which is less than n_clusters ({n_clusters}). Skipping clustering for this category.")
+        if len(words_to_cluster) < min_samples: # Need at least min_samples to form any cluster with DBSCAN
+            logging.warning(f"Category '{category_name}' has only {len(words_to_cluster)} top words, which is less than min_samples ({min_samples}). Skipping DBSCAN clustering for this category.")
             continue
         
         logging.info(f"\n--- Themes for Category: {category_name} (Top {len(words_to_cluster)} words) ---")
@@ -785,27 +787,36 @@ def cluster_top_words_for_themes(
             logging.error(f"Failed to encode words for category '{category_name}': {e}")
             continue
 
-        # Perform K-Means clustering
-        # Adjust n_clusters if it's larger than the number of samples
-        actual_n_clusters = min(n_clusters, len(words_to_cluster))
-        if actual_n_clusters < 2 : # K-Means needs at least 2 clusters, and practically more samples than clusters
-             logging.warning(f"Not enough unique words ({len(words_to_cluster)}) to form meaningful clusters for '{category_name}'. Skipping clustering.")
-             continue
-
-        kmeans = KMeans(n_clusters=actual_n_clusters, random_state=RANDOM_STATE, n_init='auto')
+        # Perform DBSCAN clustering
+        dbscan = DBSCAN(eps=eps, min_samples=min_samples, metric='cosine') # Using cosine metric, common for embeddings
         try:
-            cluster_labels = kmeans.fit_predict(word_embeddings)
+            cluster_labels = dbscan.fit_predict(word_embeddings)
         except Exception as e:
-            logging.error(f"KMeans clustering failed for category '{category_name}': {e}")
+            logging.error(f"DBSCAN clustering failed for category '{category_name}': {e}")
             continue
 
         # Group words by cluster
-        clustered_words = {i: [] for i in range(actual_n_clusters)}
-        for word, label in zip(words_to_cluster, cluster_labels):
-            clustered_words[label].append(word)
+        num_discovered_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+        logging.info(f"Discovered {num_discovered_clusters} themes (clusters) for '{category_name}'.")
 
-        for cluster_id, words_in_cluster in clustered_words.items():
+        clustered_words = {}
+        noise_words = []
+        for word, label in zip(words_to_cluster, cluster_labels):
+            if label == -1:
+                noise_words.append(word)
+            else:
+                if label not in clustered_words:
+                    clustered_words[label] = []
+                clustered_words[label].append(word)
+        
+        sorted_cluster_ids = sorted(clustered_words.keys())
+
+        for cluster_id in sorted_cluster_ids:
+            words_in_cluster = clustered_words[cluster_id]
             logging.info(f"  Theme (Cluster {cluster_id}): {', '.join(words_in_cluster)}")
+        
+        if noise_words:
+            logging.info(f"  Noise (words not in any theme): {', '.join(noise_words)}")
             
     logging.info("--- Word clustering for themes finished ---")
 
