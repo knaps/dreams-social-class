@@ -728,67 +728,6 @@ def calculate_and_save_class_tfidf_scores(
     except Exception as e:
         logging.error(f"Failed to save class TF-IDF scores: {e}")
 
-def _estimate_dbscan_eps(embeddings, min_samples, metric='cosine'):
-    """Estimates a good eps value for DBSCAN using the k-distance graph elbow method."""
-    if len(embeddings) < min_samples:
-        logging.warning(f"Not enough samples ({len(embeddings)}) to estimate eps for min_samples={min_samples}. Returning default eps.")
-        return 0.5 # Default fallback eps
-
-    nn = NearestNeighbors(n_neighbors=min_samples, metric=metric)
-    nn.fit(embeddings)
-    # distances are to the k-th neighbor (min_samples includes the point itself, so k = min_samples-1 index)
-    distances, _ = nn.kneighbors(embeddings) 
-    k_distances = np.sort(distances[:, min_samples-1], axis=0)
-
-    if len(k_distances) < 2: # Need at least two points to form a line
-        logging.warning("Not enough k-distances to determine elbow. Returning default eps.")
-        return 0.5
-
-    # Create points for the k-distance curve (index, distance)
-    indices = np.arange(len(k_distances))
-    curve_points = np.vstack((indices, k_distances)).T
-
-    line_start_pt = curve_points[0]
-    line_end_pt = curve_points[-1]
-
-    if np.all(line_start_pt == line_end_pt): # All distances are the same
-        return k_distances[0] if k_distances[0] > 0 else 0.5
-
-
-    # Use Kneedle algorithm to find the elbow
-    try:
-        # The k-distance plot is typically convex and increasing.
-        # S is a sensitivity parameter; 1.0 is a common default.
-        kneedle = KneeLocator(indices, k_distances, S=1.0, curve='convex', direction='increasing', online=False)
-        
-        if kneedle.knee_y is not None:
-            estimated_eps = kneedle.knee_y
-            elbow_index = kneedle.knee # This is the x-value (index) of the knee
-            logging.info(f"Kneedle estimated DBSCAN eps: {estimated_eps:.4f} at index {elbow_index} from k-distance plot.")
-            # Optionally, save the plot for inspection:
-            # if kneedle.plot_knee(): plt.savefig(f"cache/kneedle_plot_{np.random.randint(1000)}.png"); plt.close()
-        else:
-            logging.warning("Kneedle could not find a knee. Falling back to max perpendicular distance method.")
-            # Fallback to the previous method if Kneedle fails (though less likely with good data)
-            # This part can be simplified or removed if Kneedle is robust enough
-            x1, y1 = indices[0], k_distances[0]
-            x2, y2 = indices[-1], k_distances[-1]
-            if x1 == x2 or y1 == y2: # Simplified fallback
-                estimated_eps = np.median(k_distances) if len(k_distances) > 0 else 0.5
-            else:
-                line_A = y1 - y2; line_B = x2 - x1; line_C = x1 * y2 - x2 * y1
-                norm_factor = np.sqrt(line_A**2 + line_B**2)
-                if norm_factor == 0: norm_factor = 1.0 # Avoid division by zero
-                perp_distances = np.abs(line_A * indices + line_B * k_distances + line_C) / norm_factor
-                elbow_index = np.argmax(perp_distances)
-                estimated_eps = k_distances[elbow_index]
-            logging.info(f"Fallback estimated DBSCAN eps: {estimated_eps:.4f}.")
-
-    except Exception as e_kneedle:
-        logging.error(f"Error during Kneedle eps estimation: {e_kneedle}. Using median k-distance as fallback.")
-        estimated_eps = np.median(k_distances) if len(k_distances) > 0 else 0.5
-
-    # Ensure eps is not too small, e.g., if all distances are tiny
 def cluster_top_words_for_themes(
     tfidf_scores_path: str = CLASS_TFIDF_SCORES_PATH,
     top_n_words: int = 50,
@@ -797,7 +736,7 @@ def cluster_top_words_for_themes(
 ):
     """
     Loads TF-IDF scores, identifies top differentiating words for each class,
-    embeds them, and clusters them using DBSCAN with auto-tuned eps to find semantic themes.
+    embeds them, and uses BERTopic to find semantic themes among these words.
     """
     logging.info(f"--- Clustering top {top_n_words} words for themes using BERTopic (min_topic_size={min_topic_size}) and {embedding_model_name} ---")
 
