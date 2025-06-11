@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 from itertools import cycle
 from sentence_transformers import SentenceTransformer
 from bertopic import BERTopic # For BERTopic modeling
+from nltk.stem import WordNetLemmatizer
 
 load_dotenv()
 
@@ -34,6 +35,15 @@ try:
     nltk.data.find('corpora/stopwords')
 except nltk.downloader.DownloadError:
     nltk.download('stopwords', quiet=True)
+try:
+    nltk.data.find('corpora/wordnet')
+except nltk.downloader.DownloadError:
+    nltk.download('wordnet', quiet=True)
+try:
+    nltk.data.find('corpora/omw-1.4') # Open Multilingual Wordnet, often used with WordNetLemmatizer
+except nltk.downloader.DownloadError:
+    nltk.download('omw-1.4', quiet=True)
+
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -735,10 +745,11 @@ def cluster_top_words_for_themes(
     embedding_model_name: str = 'all-MiniLM-L6-v2' # Efficient and good quality RoBERTa-based model
 ):
     """
-    Loads TF-IDF scores, identifies top differentiating words for each class,
-    embeds them, and uses BERTopic to find semantic themes among these words.
+    Loads TF-IDF scores, lemmatizes and deduplicates top differentiating words for each class
+    (keeping the original form with the highest score for each lemma),
+    then uses BERTopic on these refined words to find semantic themes.
     """
-    logging.info(f"--- Clustering top {top_n_words} words for themes using BERTopic (min_topic_size={min_topic_size}) and {embedding_model_name} ---")
+    logging.info(f"--- Clustering top {top_n_words} (deduplicated by lemma) words for themes using BERTopic (min_topic_size={min_topic_size}) and {embedding_model_name} ---")
 
     if not os.path.exists(tfidf_scores_path):
         logging.error(f"TF-IDF scores file not found at {tfidf_scores_path}. Cannot perform word clustering.")
@@ -768,26 +779,43 @@ def cluster_top_words_for_themes(
         logging.error(f"Failed to initialize BERTopic model: {e}. Make sure 'bertopic' and its dependencies are installed.")
         return
 
+    lemmatizer = WordNetLemmatizer()
+
     for category_name in CATEGORIES: # Assumes CATEGORIES is globally defined
         diff_col = f'diff_vs_others_{category_name}'
         if diff_col not in df_tfidf.columns:
             logging.warning(f"Difference column '{diff_col}' not found for category '{category_name}'. Skipping BERTopic for this category.")
             continue
 
-        # Get top N words for the category based on the difference score
-        top_words_df = df_tfidf.sort_values(by=diff_col, ascending=False).head(top_n_words)
+        # 1. Get all words with their scores for the category
+        category_words_df = df_tfidf[['feature', diff_col]].copy()
+        category_words_df.dropna(subset=[diff_col], inplace=True) # Ensure scores are present
+
+        # 2. Lemmatize words
+        # Words are typically nouns in TF-IDF features, but lemmatizer can try 'v' if 'n' fails.
+        # For simplicity, default to noun.
+        category_words_df['lemma'] = category_words_df['feature'].apply(lambda x: lemmatizer.lemmatize(x.lower()))
         
-        if top_words_df.empty or 'feature' not in top_words_df.columns:
-            logging.warning(f"No top words found or 'feature' column missing for category '{category_name}'. Skipping.")
+        # 3. Deduplicate by lemma, keeping the original word form with the highest diff_score
+        # Sort by lemma and then by score (descending) to make it easy to pick the top one per lemma
+        category_words_df = category_words_df.sort_values(by=['lemma', diff_col], ascending=[True, False])
+        # Keep the first occurrence of each lemma (which will be the one with the highest score due to sorting)
+        deduplicated_words_df = category_words_df.drop_duplicates(subset=['lemma'], keep='first')
+
+        # 4. Select top N of these deduplicated original word forms
+        top_deduplicated_words_df = deduplicated_words_df.sort_values(by=diff_col, ascending=False).head(top_n_words)
+
+        if top_deduplicated_words_df.empty or 'feature' not in top_deduplicated_words_df.columns:
+            logging.warning(f"No top deduplicated words found or 'feature' column missing for category '{category_name}'. Skipping.")
             continue
             
-        words_for_bertopic = top_words_df['feature'].tolist()
-
+        words_for_bertopic = top_deduplicated_words_df['feature'].tolist()
+        
         if len(words_for_bertopic) < min_topic_size: 
-            logging.warning(f"Category '{category_name}' has only {len(words_for_bertopic)} top words, which is less than BERTopic min_topic_size ({min_topic_size}). Skipping BERTopic for this category.")
+            logging.warning(f"Category '{category_name}' has only {len(words_for_bertopic)} top deduplicated words, which is less than BERTopic min_topic_size ({min_topic_size}). Skipping BERTopic for this category.")
             continue
         
-        logging.info(f"\n--- BERTopic Themes for Category: {category_name} (Top {len(words_for_bertopic)} words) ---")
+        logging.info(f"\n--- BERTopic Themes for Category: {category_name} (Top {len(words_for_bertopic)} deduplicated words) ---")
         
         try:
             # BERTopic expects a list of "documents". Here, each word is a document.
