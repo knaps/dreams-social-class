@@ -56,6 +56,7 @@ ENV_PATH = '.env' # This is typically used by load_dotenv(), not directly in scr
 GRIDSEARCH_RESULTS_PATH = 'cache/gridsearch_results.joblib'
 CLASS_TFIDF_SCORES_PATH = 'cache/all_words_class_tfidf_scores.csv'
 ROC_CURVE_PLOT_PATH = 'cache/roc_auc_curves.png'
+BERTOPIC_THEMES_CSV_PATH = 'cache/bertopic_themes.csv'
 RANDOM_STATE = 42
 N_SPLITS = 5 # For cross-validation
 CATEGORIES = ['blue_collar', 'gig_worker', 'white_collar']
@@ -760,10 +761,10 @@ def cluster_top_words_for_themes(
     embedding_model_name: str = 'all-mpnet-base-v2' # Efficient and good quality RoBERTa-based model
 ):
     """
-    Loads TF-IDF scores, filters by word length, lemmatizes and deduplicates 
-    top differentiating words for each class (keeping the original form with 
-    the highest score for each lemma), then uses BERTopic on these refined words 
-    to find semantic themes.
+    Loads TF-IDF scores, filters by word length, lemmatizes and deduplicates
+    top differentiating words for each class (keeping the original form with
+    the highest score for each lemma), then uses BERTopic on these refined words
+    to find semantic themes. Saves themes to a CSV file.
     """
     logging.info(f"--- Clustering top {top_n_words} (deduplicated by lemma, min_word_length={min_word_length}) words for themes using BERTopic (min_topic_size={min_topic_size}) and {embedding_model_name} ---")
 
@@ -796,6 +797,7 @@ def cluster_top_words_for_themes(
         return
 
     lemmatizer = WordNetLemmatizer()
+    all_themes_data = [] # To store theme data for all categories
 
     for category_name in CATEGORIES: # Assumes CATEGORIES is globally defined
         diff_col = f'diff_vs_others_{category_name}'
@@ -881,8 +883,20 @@ def cluster_top_words_for_themes(
                 
                 if topic_id == -1:
                     logging.info(f"  Outliers (words not in any specific theme - {topic_name_info}): {', '.join(theme_words)}")
+                    all_themes_data.append({
+                        'category': category_name,
+                        'topic_id': -1,
+                        'topic_name': topic_name_info,
+                        'words': ', '.join(theme_words) # Save as comma-separated string
+                    })
                 else:
                     logging.info(f"  Theme (Topic {topic_id} - {topic_name_info}): {', '.join(theme_words)}")
+                    all_themes_data.append({
+                        'category': category_name,
+                        'topic_id': topic_id,
+                        'topic_name': topic_name_info,
+                        'words': ', '.join(theme_words) # Save as comma-separated string
+                    })
             
             # Reset BERTopic model for the next category to avoid interference,
             # as fit_transform can modify internal state.
@@ -906,6 +920,18 @@ def cluster_top_words_for_themes(
             continue
             
     logging.info("--- BERTopic word theming finished ---")
+
+    # Save all themes data to CSV
+    if all_themes_data:
+        themes_df = pd.DataFrame(all_themes_data)
+        try:
+            os.makedirs(os.path.dirname(BERTOPIC_THEMES_CSV_PATH), exist_ok=True)
+            themes_df.to_csv(BERTOPIC_THEMES_CSV_PATH, index=False)
+            logging.info(f"BERTopic themes saved to {BERTOPIC_THEMES_CSV_PATH}")
+        except Exception as e:
+            logging.error(f"Failed to save BERTopic themes to CSV: {e}")
+    else:
+        logging.info("No themes were generated to save.")
 
 
 def main():
