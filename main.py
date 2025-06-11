@@ -742,7 +742,7 @@ def cluster_top_words_for_themes(
     tfidf_scores_path: str = CLASS_TFIDF_SCORES_PATH,
     top_n_words: int = 50,
     min_topic_size: int = 3, # BERTopic: min words to form a topic/theme
-    embedding_model_name: str = 'all-MiniLM-L6-v2' # Efficient and good quality RoBERTa-based model
+    embedding_model_name: str = 'all-mpnet-base-v2' # Efficient and good quality RoBERTa-based model
 ):
     """
     Loads TF-IDF scores, lemmatizes and deduplicates top differentiating words for each class
