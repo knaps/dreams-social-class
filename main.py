@@ -1068,10 +1068,10 @@ def calculate_and_save_theme_prevalence(
                 try:
                     _, p_value, _, _ = chi2_contingency(contingency_table, correction=True) # Yates' correction for 2x2
                 except ValueError as ve: # Handles cases like all zeros in a row/column
-                    logging.warning(f"Chi-squared test failed for theme '{topic_name}', category '{actual_category_label}': {ve}. Table: {contingency_table}")
+                    logging.warning(f"Chi-squared test failed for theme '{topic_name_raw}', category '{actual_category_label}': {ve}. Table: {contingency_table}")
                     p_value = np.nan # Or 1.0 if we want to signify no significance found due to error
             else:
-                 logging.warning(f"Skipping Chi-squared test for theme '{topic_name}', category '{actual_category_label}' due to invalid contingency table: {contingency_table}")
+                 logging.warning(f"Skipping Chi-squared test for theme '{topic_name_raw}', category '{actual_category_label}' due to invalid contingency table: {contingency_table}")
 
 
             theme_data[f'{actual_category_label}_chi2_p_value'] = p_value
@@ -1081,8 +1081,8 @@ def calculate_and_save_theme_prevalence(
     if prevalence_results:
         df_prevalence = pd.DataFrame(prevalence_results)
         try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            df_prevalence.to_csv(output_path, index=False)
+            os.makedirs(os.path.dirname(stats_output_path), exist_ok=True)
+            df_prevalence.to_csv(stats_output_path, index=False)
             logging.info(f"Theme prevalence statistics saved to {stats_output_path}")
         except Exception as e:
             logging.error(f"Failed to save theme prevalence statistics: {e}")
