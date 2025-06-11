@@ -65,8 +65,6 @@
         - Calculate the mean TF-IDF score for each word within Group 1 and Group 2.
         - Calculate a difference score: `mean_tfidf_Group1 - mean_tfidf_Group2`.
     - Output: A list of all 5000 words with their mean TF-IDF scores for each predicted class and the calculated difference scores, saved to `cache/all_words_class_tfidf_scores.csv`.
-- **LLM-based Theming (Initial Exploration)**:
-    - Top 20 words with the highest positive difference score for each category were submitted to an LLM (GPT-4o via `simpleaichat`). For example, for 'blue_collar', top words included "wife, car, girlfriend, door, see, house..." which the LLM grouped into themes like "Domestic Life and Relationships" and "Vehicles and Movement".
 
 ## 5. Thematic Analysis of Differentiating Language (BERTopic)
 - **Objective**: To systematically identify semantic themes among the words most characteristic of each socioeconomic category.
