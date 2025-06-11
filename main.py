@@ -60,6 +60,7 @@ CLASS_TFIDF_SCORES_PATH = 'cache/all_words_class_tfidf_scores.csv'
 ROC_CURVE_PLOT_PATH = 'cache/roc_auc_curves.png'
 BERTOPIC_THEMES_CSV_PATH = 'cache/bertopic_themes.csv'
 THEME_PREVALENCE_CSV_PATH = 'cache/theme_prevalence_stats.csv'
+DREAMS_WITH_THEMES_CSV_PATH = 'cache/dreams_with_theme_flags.csv'
 RANDOM_STATE = 42
 N_SPLITS = 5 # For cross-validation
 CATEGORIES = ['blue_collar', 'gig_worker', 'white_collar']
@@ -939,16 +940,18 @@ def cluster_top_words_for_themes(
 def calculate_and_save_theme_prevalence(
     themes_path: str = BERTOPIC_THEMES_CSV_PATH,
     dreams_csv_path: str = CSV_PATH,
-    output_path: str = THEME_PREVALENCE_CSV_PATH
+    stats_output_path: str = THEME_PREVALENCE_CSV_PATH, # Renamed for clarity
+    dreams_with_themes_output_path: str = DREAMS_WITH_THEMES_CSV_PATH
 ):
     """
-    Loads BERTopic themes and the dream dataset, calculates theme prevalence
-    overall and per actual category, performs statistical tests, and saves results.
+    Loads BERTopic themes and the dream dataset.
+    1. Calculates theme prevalence overall and per actual category, performs statistical tests, and saves these stats.
+    2. Creates a new dataset with the original dreams and new columns indicating theme presence, saving this dataset.
     """
-    logging.info(f"--- Calculating theme prevalence and saving to {output_path} ---")
+    logging.info(f"--- Calculating theme prevalence (stats to {stats_output_path}, dataset to {dreams_with_themes_output_path}) ---")
 
     if not os.path.exists(themes_path):
-        logging.error(f"Themes file not found at {themes_path}. Cannot calculate prevalence.")
+        logging.error(f"Themes file not found at {themes_path}. Cannot calculate prevalence or create dataset with themes.")
         return
 
     try:
@@ -967,7 +970,9 @@ def calculate_and_save_theme_prevalence(
         if df_dreams is None or df_dreams.empty or 'dream' not in df_dreams.columns or 'y' not in df_dreams.columns:
             logging.error("Cleaned dream dataset is unsuitable for prevalence calculation.")
             return
-        df_dreams['dream_lower'] = df_dreams['dream'].astype(str).str.lower()
+        df_dreams['dream_lower'] = df_dreams['dream'].astype(str).str.lower() # For case-insensitive matching
+        # Keep a copy of the original df_dreams to add theme columns to, before 'matches_theme' is overwritten in loop
+        df_dreams_for_output = df_dreams.copy() 
     except Exception as e:
         logging.error(f"Failed to load or process dream dataset: {e}")
         return
@@ -975,40 +980,60 @@ def calculate_and_save_theme_prevalence(
     prevalence_results = []
     total_dreams = len(df_dreams)
 
+    # Sanitize theme names for use as column headers
+    def sanitize_col_name(name_str):
+        name_str = re.sub(r'[^a-zA-Z0-9_]', '_', name_str) # Replace non-alphanumeric with underscore
+        name_str = re.sub(r'_+', '_', name_str) # Replace multiple underscores with single
+        name_str = name_str.strip('_')
+        return name_str[:50] # Truncate if too long
+
     for _, theme_row in df_themes.iterrows():
         theme_category_derived_from = theme_row['category']
         topic_id = theme_row['topic_id']
-        topic_name = theme_row['topic_name']
+        topic_name_raw = theme_row['topic_name'] # e.g., "0_wife_wall_truck_town" or "-1_window_water_towards_top"
         theme_words_str = theme_row['words']
         
         if pd.isna(theme_words_str):
-            logging.warning(f"Skipping theme {topic_name} for category {theme_category_derived_from} due to missing words.")
+            logging.warning(f"Skipping theme {topic_name_raw} for category {theme_category_derived_from} due to missing words.")
             continue
         
         theme_word_list = [word.strip() for word in theme_words_str.split(',')]
-        # Filter out empty strings that might result from splitting if words are not perfectly formatted
-        theme_word_list = [word for word in theme_word_list if word]
+        theme_word_list = [word for word in theme_word_list if word] # Filter out empty strings
 
         if not theme_word_list:
-            logging.warning(f"Skipping theme {topic_name} for category {theme_category_derived_from} as word list is empty after parsing.")
+            logging.warning(f"Skipping theme {topic_name_raw} for category {theme_category_derived_from} as word list is empty after parsing.")
             continue
 
-        # Create a regex pattern to match any of the theme words (whole word match, case insensitive handled by dream_lower)
-        # Using \b for word boundaries to avoid partial matches (e.g., 'cat' in 'caterpillar')
+        # Synthesize a column name for the theme
+        # Example: theme_blue_collar_T0_wife_wall or theme_blue_collar_T-1_outliers_window
+        topic_prefix = f"T{topic_id}" if topic_id != -1 else "TOutliers"
+        # Use first few words from topic_name_raw (which itself is derived from words)
+        short_topic_desc = sanitize_col_name(topic_name_raw.split('_', 1)[-1]) # Get part after T(ID)_
+        theme_col_header = f"theme_{sanitize_col_name(theme_category_derived_from)}_{topic_prefix}_{short_topic_desc}"
+        
         pattern = r'\b(' + '|'.join(re.escape(word) for word in theme_word_list) + r')\b'
         
+        current_theme_matches = pd.Series(False, index=df_dreams.index) # Default to False
         try:
-            df_dreams['matches_theme'] = df_dreams['dream_lower'].str.contains(pattern, regex=True)
+            current_theme_matches = df_dreams['dream_lower'].str.contains(pattern, regex=True)
         except re.error as re_e:
-            logging.error(f"Regex error for theme '{topic_name}' (words: {theme_words_str}): {re_e}. Skipping this theme.")
+            logging.error(f"Regex error for theme '{topic_name_raw}' (words: {theme_words_str}): {re_e}. Skipping this theme for stats and dataset output.")
+            # Add empty column to df_dreams_for_output to maintain structure if needed, or skip
+            df_dreams_for_output[theme_col_header] = 0 
             continue
-
+        
+        # Add boolean/int column to the output DataFrame
+        df_dreams_for_output[theme_col_header] = current_theme_matches.astype(int)
+        
+        # For prevalence stats, use this specific theme's matches
+        df_dreams['matches_theme'] = current_theme_matches # Overwrite for current theme's stats calculation
         overall_theme_dream_count = df_dreams['matches_theme'].sum()
 
         theme_data = {
             'derived_from_category': theme_category_derived_from,
             'topic_id': topic_id,
-            'topic_name': topic_name,
+            'topic_name': topic_name_raw, # Use the raw name from CSV for stats
+            'theme_column_in_dataset': theme_col_header, # Store the generated column name
             'theme_words': theme_words_str,
             'overall_dream_count_for_theme': overall_theme_dream_count,
             'overall_proportion_for_theme': overall_theme_dream_count / total_dreams if total_dreams > 0 else 0
@@ -1058,11 +1083,25 @@ def calculate_and_save_theme_prevalence(
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             df_prevalence.to_csv(output_path, index=False)
-            logging.info(f"Theme prevalence statistics saved to {output_path}")
+            logging.info(f"Theme prevalence statistics saved to {stats_output_path}")
         except Exception as e:
             logging.error(f"Failed to save theme prevalence statistics: {e}")
     else:
-        logging.info("No theme prevalence results generated to save.")
+        logging.info("No theme prevalence results generated to save for stats CSV.")
+
+    # Save the dreams dataset with added theme flag columns
+    try:
+        # Drop the temporary 'dream_lower' and the original 'embedding' column before saving
+        if 'dream_lower' in df_dreams_for_output.columns:
+            df_dreams_for_output = df_dreams_for_output.drop(columns=['dream_lower'])
+        if 'embedding' in df_dreams_for_output.columns:
+            df_dreams_for_output = df_dreams_for_output.drop(columns=['embedding'])
+        
+        os.makedirs(os.path.dirname(dreams_with_themes_output_path), exist_ok=True)
+        df_dreams_for_output.to_csv(dreams_with_themes_output_path, index=False)
+        logging.info(f"Dreams dataset with theme flags saved to {dreams_with_themes_output_path}")
+    except Exception as e:
+        logging.error(f"Failed to save dreams dataset with theme flags: {e}")
 
 
 def main():
@@ -1139,8 +1178,8 @@ def main():
         calculate_and_save_class_tfidf_scores(df.copy(), X_full, model, text_column_name='dream')
         # Cluster top words for themes after TF-IDF scores are saved
         cluster_top_words_for_themes()
-        # Calculate and save theme prevalence statistics
-        calculate_and_save_theme_prevalence()
+        # Calculate and save theme prevalence statistics, and save dataset with theme flags
+        calculate_and_save_theme_prevalence() # Uses default paths
     
     logging.info("--- Script Finished ---")
 
