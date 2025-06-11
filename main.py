@@ -742,14 +742,16 @@ def cluster_top_words_for_themes(
     tfidf_scores_path: str = CLASS_TFIDF_SCORES_PATH,
     top_n_words: int = 50,
     min_topic_size: int = 3, # BERTopic: min words to form a topic/theme
+    min_word_length: int = 3, # Minimum length for a word to be considered
     embedding_model_name: str = 'all-mpnet-base-v2' # Efficient and good quality RoBERTa-based model
 ):
     """
-    Loads TF-IDF scores, lemmatizes and deduplicates top differentiating words for each class
-    (keeping the original form with the highest score for each lemma),
-    then uses BERTopic on these refined words to find semantic themes.
+    Loads TF-IDF scores, filters by word length, lemmatizes and deduplicates 
+    top differentiating words for each class (keeping the original form with 
+    the highest score for each lemma), then uses BERTopic on these refined words 
+    to find semantic themes.
     """
-    logging.info(f"--- Clustering top {top_n_words} (deduplicated by lemma) words for themes using BERTopic (min_topic_size={min_topic_size}) and {embedding_model_name} ---")
+    logging.info(f"--- Clustering top {top_n_words} (deduplicated by lemma, min_word_length={min_word_length}) words for themes using BERTopic (min_topic_size={min_topic_size}) and {embedding_model_name} ---")
 
     if not os.path.exists(tfidf_scores_path):
         logging.error(f"TF-IDF scores file not found at {tfidf_scores_path}. Cannot perform word clustering.")
@@ -790,6 +792,16 @@ def cluster_top_words_for_themes(
         # 1. Get all words with their scores for the category
         category_words_df = df_tfidf[['feature', diff_col]].copy()
         category_words_df.dropna(subset=[diff_col], inplace=True) # Ensure scores are present
+
+        # Filter by minimum word length
+        original_word_count = len(category_words_df)
+        category_words_df = category_words_df[category_words_df['feature'].str.len() >= min_word_length]
+        if len(category_words_df) < original_word_count:
+            logging.debug(f"Filtered out {original_word_count - len(category_words_df)} words shorter than {min_word_length} chars for category '{category_name}'.")
+        
+        if category_words_df.empty:
+            logging.warning(f"No words remaining for category '{category_name}' after min_word_length filter. Skipping.")
+            continue
 
         # 2. Lemmatize words
         # Words are typically nouns in TF-IDF features, but lemmatizer can try 'v' if 'n' fails.
