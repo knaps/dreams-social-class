@@ -1,13 +1,13 @@
 # Project Methods Outline
 
 ## 1. Data Collection and Preprocessing
-- Source of dream narratives (briefly describe, e.g., online forums, specific subreddits if applicable).
+- Source of dream narratives from r/dreams subreddit from 2009 through entirety of 2024
 - Initial dataset characteristics: 22,897 dreams, associated metadata (e.g., author, timestamp, pre-assigned category labels, pre-computed embeddings).
     - Raw distribution: 'blue_collar': 11,656 dreams (7,892 unique authors); 'gig_worker': 7,444 dreams (4,926 unique authors); 'white_collar': 8,061 dreams (5,534 unique authors).
     - 15,688 unique authors in the raw dataset.
 - Embedding generation: Pre-computed text embeddings (e.g., "text-embedding-3-large" via OpenAI API, or similar) were provided with the dataset.
 - Data cleaning:
-    - Handling of missing or malformed embeddings: 3,509 rows dropped due to embedding parsing errors.
+    - Remove based on dream length: 3,509 rows dropped due to dream text length being shorter than 200 characters or greater than 20,000 characters in length
     - Filtering criteria:
         - Exclusion of dreams associated with users belonging to multiple socioeconomic categories (i.e., `n_categories > 1`). This removed 3,961 records.
 - Final dataset for analysis: 18,936 dreams after cleaning and filtering for `n_categories = 1`.
@@ -18,8 +18,7 @@
     - Dream counts per socioeconomic category: 'blue_collar': 8,165; 'gig_worker': 4,814; 'white_collar': 5,957.
     - Unique author counts overall: 13,256.
     - Unique author counts per category: 'blue_collar': 5,787; 'gig_worker': 3,424; 'white_collar': 4,045.
-    - Temporal distribution of dreams (e.g., counts by year): Data spans from 2009 to 2025, with increasing dream counts in more recent years (e.g., 2023: 2,501 dreams; 2024: 3,222 dreams in the cleaned set).
-- Rationale for focusing on single-category assignments: To ensure clear and unambiguous labeling for model training and analysis.
+    - Temporal distribution of dreams (e.g., counts by year): Data spans from 2009 to 2024, with increasing dream counts in more recent years (e.g., 2023: 2,501 dreams; 2024: 3,222 dreams in the cleaned set).
 
 ## 3. Socioeconomic Classification Model
 - **Objective**: To develop a model capable of classifying dream narratives into one of three socioeconomic categories: 'blue_collar', 'gig_worker', or 'white_collar', based on their text embeddings.
