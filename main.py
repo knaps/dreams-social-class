@@ -1122,6 +1122,8 @@ def main():
     logging.info(f"Training set size: {len(X_train)}, Test set size: {len(X_test)}")
     
     model = find_best_model(X_train, y_train) # find_best_model uses N_SPLITS for CV on training data
+    if model:
+        logging.info(f"Parameters of the best model being used: {model.get_params()}")
 
     evaluate_performance(model, X_test, y_test, target_names=CATEGORIES)
 
