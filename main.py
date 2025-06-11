@@ -22,6 +22,7 @@ from itertools import cycle
 from sentence_transformers import SentenceTransformer
 from bertopic import BERTopic # For BERTopic modeling
 from nltk.stem import WordNetLemmatizer
+from nltk.tag import pos_tag # For Part-of-Speech tagging
 
 load_dotenv()
 
@@ -738,6 +739,19 @@ def calculate_and_save_class_tfidf_scores(
     except Exception as e:
         logging.error(f"Failed to save class TF-IDF scores: {e}")
 
+def get_wordnet_pos(treebank_tag):
+    """Converts Treebank POS tags to WordNet POS tags."""
+    if treebank_tag.startswith('J'):
+        return nltk.corpus.wordnet.ADJ
+    elif treebank_tag.startswith('V'):
+        return nltk.corpus.wordnet.VERB
+    elif treebank_tag.startswith('N'):
+        return nltk.corpus.wordnet.NOUN
+    elif treebank_tag.startswith('R'):
+        return nltk.corpus.wordnet.ADV
+    else:
+        return nltk.corpus.wordnet.NOUN # Default to noun if not found
+
 def cluster_top_words_for_themes(
     tfidf_scores_path: str = CLASS_TFIDF_SCORES_PATH,
     top_n_words: int = 50,
@@ -803,10 +817,20 @@ def cluster_top_words_for_themes(
             logging.warning(f"No words remaining for category '{category_name}' after min_word_length filter. Skipping.")
             continue
 
-        # 2. Lemmatize words
-        # Words are typically nouns in TF-IDF features, but lemmatizer can try 'v' if 'n' fails.
-        # For simplicity, default to noun.
-        category_words_df['lemma'] = category_words_df['feature'].apply(lambda x: lemmatizer.lemmatize(x.lower()))
+        # 2. Lemmatize words using POS tags
+        words_to_lemmatize = category_words_df['feature'].tolist()
+        # Get POS tags for the words
+        # nltk.pos_tag expects a list of tokens.
+        # Ensure words are lowercase for consistency before POS tagging, though POS tagging itself is case-sensitive.
+        # However, features from TF-IDF are already lowercase from word_tokenize and .lower()
+        tagged_words = nltk.pos_tag(words_to_lemmatize) 
+        
+        lemmas = []
+        for word, tag in tagged_words:
+            wordnet_pos = get_wordnet_pos(tag)
+            lemmas.append(lemmatizer.lemmatize(word, pos=wordnet_pos)) # word is already lowercase from TF-IDF
+        
+        category_words_df['lemma'] = lemmas
         
         # 3. Deduplicate by lemma, keeping the original word form with the highest diff_score
         # Sort by lemma and then by score (descending) to make it easy to pick the top one per lemma
