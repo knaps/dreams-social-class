@@ -23,6 +23,8 @@ from sentence_transformers import SentenceTransformer
 from bertopic import BERTopic # For BERTopic modeling
 from nltk.stem import WordNetLemmatizer
 from nltk.tag import pos_tag # For Part-of-Speech tagging
+from scipy.stats import chi2_contingency
+import re # For regex matching of theme words
 
 load_dotenv()
 
@@ -57,6 +59,7 @@ GRIDSEARCH_RESULTS_PATH = 'cache/gridsearch_results.joblib'
 CLASS_TFIDF_SCORES_PATH = 'cache/all_words_class_tfidf_scores.csv'
 ROC_CURVE_PLOT_PATH = 'cache/roc_auc_curves.png'
 BERTOPIC_THEMES_CSV_PATH = 'cache/bertopic_themes.csv'
+THEME_PREVALENCE_CSV_PATH = 'cache/theme_prevalence_stats.csv'
 RANDOM_STATE = 42
 N_SPLITS = 5 # For cross-validation
 CATEGORIES = ['blue_collar', 'gig_worker', 'white_collar']
@@ -933,6 +936,134 @@ def cluster_top_words_for_themes(
     else:
         logging.info("No themes were generated to save.")
 
+def calculate_and_save_theme_prevalence(
+    themes_path: str = BERTOPIC_THEMES_CSV_PATH,
+    dreams_csv_path: str = CSV_PATH,
+    output_path: str = THEME_PREVALENCE_CSV_PATH
+):
+    """
+    Loads BERTopic themes and the dream dataset, calculates theme prevalence
+    overall and per actual category, performs statistical tests, and saves results.
+    """
+    logging.info(f"--- Calculating theme prevalence and saving to {output_path} ---")
+
+    if not os.path.exists(themes_path):
+        logging.error(f"Themes file not found at {themes_path}. Cannot calculate prevalence.")
+        return
+
+    try:
+        df_themes = pd.read_csv(themes_path)
+    except Exception as e:
+        logging.error(f"Failed to load themes from {themes_path}: {e}")
+        return
+
+    # Load and prepare dream data
+    try:
+        df_dreams_raw = load_dreams(dreams_csv_path)
+        if df_dreams_raw is None or df_dreams_raw.empty:
+            logging.error("Failed to load or raw dream dataset is empty.")
+            return
+        df_dreams = analyze_and_clean(df_dreams_raw) # This gives us 'y' (actual labels) and 'dream' text
+        if df_dreams is None or df_dreams.empty or 'dream' not in df_dreams.columns or 'y' not in df_dreams.columns:
+            logging.error("Cleaned dream dataset is unsuitable for prevalence calculation.")
+            return
+        df_dreams['dream_lower'] = df_dreams['dream'].astype(str).str.lower()
+    except Exception as e:
+        logging.error(f"Failed to load or process dream dataset: {e}")
+        return
+
+    prevalence_results = []
+    total_dreams = len(df_dreams)
+
+    for _, theme_row in df_themes.iterrows():
+        theme_category_derived_from = theme_row['category']
+        topic_id = theme_row['topic_id']
+        topic_name = theme_row['topic_name']
+        theme_words_str = theme_row['words']
+        
+        if pd.isna(theme_words_str):
+            logging.warning(f"Skipping theme {topic_name} for category {theme_category_derived_from} due to missing words.")
+            continue
+        
+        theme_word_list = [word.strip() for word in theme_words_str.split(',')]
+        # Filter out empty strings that might result from splitting if words are not perfectly formatted
+        theme_word_list = [word for word in theme_word_list if word]
+
+        if not theme_word_list:
+            logging.warning(f"Skipping theme {topic_name} for category {theme_category_derived_from} as word list is empty after parsing.")
+            continue
+
+        # Create a regex pattern to match any of the theme words (whole word match, case insensitive handled by dream_lower)
+        # Using \b for word boundaries to avoid partial matches (e.g., 'cat' in 'caterpillar')
+        pattern = r'\b(' + '|'.join(re.escape(word) for word in theme_word_list) + r')\b'
+        
+        try:
+            df_dreams['matches_theme'] = df_dreams['dream_lower'].str.contains(pattern, regex=True)
+        except re.error as re_e:
+            logging.error(f"Regex error for theme '{topic_name}' (words: {theme_words_str}): {re_e}. Skipping this theme.")
+            continue
+
+        overall_theme_dream_count = df_dreams['matches_theme'].sum()
+
+        theme_data = {
+            'derived_from_category': theme_category_derived_from,
+            'topic_id': topic_id,
+            'topic_name': topic_name,
+            'theme_words': theme_words_str,
+            'overall_dream_count_for_theme': overall_theme_dream_count,
+            'overall_proportion_for_theme': overall_theme_dream_count / total_dreams if total_dreams > 0 else 0
+        }
+
+        for actual_category_label in CATEGORIES: # e.g., 'blue_collar', 'gig_worker', 'white_collar'
+            # Dreams in this actual category
+            df_in_actual_category = df_dreams[df_dreams['y'] == actual_category_label]
+            count_in_actual_category_with_theme = df_in_actual_category['matches_theme'].sum()
+            total_in_actual_category = len(df_in_actual_category)
+
+            theme_data[f'{actual_category_label}_dream_count_for_theme'] = count_in_actual_category_with_theme
+            theme_data[f'{actual_category_label}_proportion_for_theme'] = count_in_actual_category_with_theme / total_in_actual_category if total_in_actual_category > 0 else 0
+            
+            # For statistical test: compare current actual_category vs. all OTHER actual_categories
+            # Table: [ [in_cat_with_theme, in_cat_without_theme], [other_cats_with_theme, other_cats_without_theme] ]
+            
+            in_cat_without_theme = total_in_actual_category - count_in_actual_category_with_theme
+            
+            df_other_actual_categories = df_dreams[df_dreams['y'] != actual_category_label]
+            count_other_actual_categories_with_theme = df_other_actual_categories['matches_theme'].sum()
+            total_other_actual_categories = len(df_other_actual_categories)
+            other_cats_without_theme = total_other_actual_categories - count_other_actual_categories_with_theme
+
+            contingency_table = [
+                [count_in_actual_category_with_theme, in_cat_without_theme],
+                [count_other_actual_categories_with_theme, other_cats_without_theme]
+            ]
+            
+            p_value = np.nan
+            if np.sum(contingency_table) > 0 and all(np.array(contingency_table).flatten() >= 0): # Ensure valid table for test
+                try:
+                    _, p_value, _, _ = chi2_contingency(contingency_table, correction=True) # Yates' correction for 2x2
+                except ValueError as ve: # Handles cases like all zeros in a row/column
+                    logging.warning(f"Chi-squared test failed for theme '{topic_name}', category '{actual_category_label}': {ve}. Table: {contingency_table}")
+                    p_value = np.nan # Or 1.0 if we want to signify no significance found due to error
+            else:
+                 logging.warning(f"Skipping Chi-squared test for theme '{topic_name}', category '{actual_category_label}' due to invalid contingency table: {contingency_table}")
+
+
+            theme_data[f'{actual_category_label}_chi2_p_value'] = p_value
+        
+        prevalence_results.append(theme_data)
+
+    if prevalence_results:
+        df_prevalence = pd.DataFrame(prevalence_results)
+        try:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            df_prevalence.to_csv(output_path, index=False)
+            logging.info(f"Theme prevalence statistics saved to {output_path}")
+        except Exception as e:
+            logging.error(f"Failed to save theme prevalence statistics: {e}")
+    else:
+        logging.info("No theme prevalence results generated to save.")
+
 
 def main():
     # Ensure cache directory exists
@@ -1006,6 +1137,8 @@ def main():
         calculate_and_save_class_tfidf_scores(df.copy(), X_full, model, text_column_name='dream')
         # Cluster top words for themes after TF-IDF scores are saved
         cluster_top_words_for_themes()
+        # Calculate and save theme prevalence statistics
+        calculate_and_save_theme_prevalence()
     
     logging.info("--- Script Finished ---")
 
