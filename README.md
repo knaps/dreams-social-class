@@ -35,6 +35,10 @@
         - Parameters tuned for PCA (e.g., n_components).
     - Evaluation Metric for GridSearchCV: Weighted One-vs-Rest (OvR) ROC AUC.
     - Caching: Best model pipeline cached to `cache/gridsearch_results.joblib`.
+    - **Best Performing Model Configuration**:
+        - Pipeline: StandardScaler -> PCA -> LogisticRegression.
+        - PCA: `n_components=200`.
+        - Logistic Regression: `C=0.001`, `penalty='l2'`, `solver='saga'`, `multi_class='multinomial'`, `class_weight='balanced'`.
 - **Model Evaluation (on the test set)**:
     - Overall Accuracy: 0.43.
     - Weighted OvR ROC AUC Score: 0.6025.
