@@ -29,19 +29,19 @@ load_dotenv()
 # Ensure NLTK data is downloaded once
 try:
     nltk.data.find('tokenizers/punkt')
-except nltk.downloader.DownloadError:
+except LookupError:
     nltk.download('punkt', quiet=True)
 try:
     nltk.data.find('corpora/stopwords')
-except nltk.downloader.DownloadError:
+except LookupError:
     nltk.download('stopwords', quiet=True)
 try:
     nltk.data.find('corpora/wordnet')
-except nltk.downloader.DownloadError:
+except LookupError:
     nltk.download('wordnet', quiet=True)
 try:
     nltk.data.find('corpora/omw-1.4') # Open Multilingual Wordnet, often used with WordNetLemmatizer
-except nltk.downloader.DownloadError:
+except LookupError:
     nltk.download('omw-1.4', quiet=True)
 
 
